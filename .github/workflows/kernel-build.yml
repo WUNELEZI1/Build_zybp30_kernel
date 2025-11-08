@@ -1,4 +1,4 @@
-name: Kernel Build Diagnostics
+name: Build MT6768 Kernel (Final Fix)
 
 on:
   workflow_dispatch:
@@ -13,9 +13,9 @@ env:
   SUBARCH: arm64
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
     - name: Checkout repository
@@ -38,154 +38,166 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Download Android NDK
-      run: |
-        wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
-        unzip -q android-ndk-r23c-linux.zip
-        echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
-
-    - name: Setup environment
-      run: |
-        echo "ARCH=arm64" >> $GITHUB_ENV
-        echo "SUBARCH=arm64" >> $GITHUB_ENV
-        
-        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
-        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-
-    - name: Verify kernel source
+    - name: Fix kernel configuration issues
       run: |
         cd $KERNEL_DIR
-        echo "=== 内核源码验证 ==="
-        echo "当前目录: $(pwd)"
-        echo "目录内容:"
-        ls -la
-        echo "Makefile 存在: $( [ -f Makefile ] && echo '是' || echo '否' )"
-        echo "defconfig 存在: $( [ -f arch/arm64/configs/k69v1_64_k419_defconfig ] && echo '是' || echo '否' )"
-        
-        if [ -f Makefile ]; then
-          echo "内核版本:"
-          head -5 Makefile
-        fi
-
-    - name: Test configuration
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 测试内核配置 ==="
+        echo "=== 修复内核配置问题 ==="
         
         # 清理
         rm -rf out
         mkdir -p out
         
-        # 尝试配置
-        echo "尝试配置内核..."
+        # 关键修复：使用系统 GCC 进行配置阶段
+        echo "使用系统 GCC 进行配置..."
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }} && {
           echo "✅ 配置成功"
-          ls -la out/
         } || {
-          echo "❌ 配置失败"
-          echo "尝试使用 defconfig..."
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig && {
-            echo "✅ 基础配置成功"
-            ls -la out/
-          } || {
-            echo "❌ 所有配置都失败"
-          }
+          echo "❌ 特定配置失败，使用基础配置"
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
         }
-
-    - name: Test compilation
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 测试编译 ==="
         
-        if [ ! -f "out/.config" ]; then
-          echo "❌ 没有配置文件，跳过编译测试"
-          exit 0
-        fi
+        # 修复 Kconfig 冲突
+        echo "修复 Kconfig 类型重定义冲突..."
+        # 禁用有冲突的配置
+        ./scripts/config --file out/.config -d CHARGER_BQ25890
+        ./scripts/config --file out/.config -d MTK_CMDQ
+        ./scripts/config --file out/.config -d MTK_QOS_FRAMEWORK
+        ./scripts/config --file out/.config -d TOUCHSCREEN_GOODIX_BRL
         
-        echo "开始编译测试..."
-        # 只编译少量目标来测试工具链
-        make O=out ARCH=arm64 -j1 \
-          CC="$CC" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
-          CLANG_TRIPLE="$CLANG_TRIPLE" \
-          scripts 2>&1 | tee compile-test.log || {
-          echo "编译测试失败"
-          tail -20 compile-test.log
-        }
-
-    - name: Full compilation attempt
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 完整编译尝试 ==="
-        
-        if [ ! -f "out/.config" ]; then
-          echo "❌ 没有配置文件，无法编译"
-          exit 1
-        fi
-        
-        # 禁用有问题的驱动
-        echo "调整配置以解决链接错误..."
+        # 禁用已知有问题的驱动
         ./scripts/config --file out/.config -d ACCDET_MT6358
         ./scripts/config --file out/.config -d MTK_SENSORS_1_0
         ./scripts/config --file out/.config -d INPUT_FINGERPRINT
         ./scripts/config --file out/.config -d MEDIATEX_EXTCON
-        make O=out ARCH=arm64 olddefconfig
         
-        echo "开始完整编译..."
-        time make O=out ARCH=arm64 -j2 \
-          CC="$CC" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
-          CLANG_TRIPLE="$CLANG_TRIPLE" \
-          2>&1 | tee full-build.log
+        # 更新配置
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-    - name: Analyze results
+    - name: Setup compilation environment
+      run: |
+        echo "=== 设置编译环境 ==="
+        
+        # 方案1：使用系统 GCC 工具链（推荐）
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+        
+        # 验证工具链
+        echo "验证 GCC 工具链:"
+        aarch64-linux-gnu-gcc --version || echo "GCC 不可用"
+
+    - name: Build kernel with GCC
       run: |
         cd $KERNEL_DIR
-        echo "=== 结果分析 ==="
         
-        echo "1. out 目录状态:"
-        find out/ -type f 2>/dev/null | head -20 || echo "out 目录为空"
+        if [ ! -f "out/.config" ]; then
+          echo "❌ 没有配置文件"
+          exit 1
+        fi
         
-        echo "2. 编译日志分析:"
-        if [ -f "full-build.log" ]; then
-          echo "编译日志行数: $(wc -l < full-build.log)"
-          echo "错误数量: $(grep -c "error:" full-build.log || echo 0)"
-          echo "警告数量: $(grep -c "warning:" full-build.log || echo 0)"
+        echo "=== 使用 GCC 工具链编译内核 ==="
+        echo "使用的工具链:"
+        echo "CC: $CC"
+        echo "CROSS_COMPILE: $CROSS_COMPILE"
+        echo "ARCH: $ARCH"
+        
+        # 显示配置摘要
+        echo "配置摘要:"
+        grep -E "CONFIG_LOCALVERSION|CONFIG_ARM64|CONFIG_CPU" out/.config | head -10
+        
+        echo "开始编译..."
+        time make O=out ARCH=arm64 -j$(($(nproc)/2)) \
+          CROSS_COMPILE="$CROSS_COMPILE" \
+          2>&1 | tee build.log
+
+    - name: Check build results
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 构建结果检查 ==="
+        
+        if [ -f "build.log" ]; then
+          echo "构建日志: $(wc -l < build.log) 行"
+          echo "错误统计: $(grep -c "error:" build.log || echo 0)"
+          echo "警告统计: $(grep -c "warning:" build.log || echo 0)"
           
-          echo "最后错误:"
-          grep "error:" full-build.log | tail -5 || echo "无错误"
+          # 检查关键错误
+          if grep -q "error:" build.log; then
+            echo "关键错误:"
+            grep "error:" build.log | tail -10
+          fi
+        fi
+        
+        # 详细检查输出文件
+        echo "=== 输出文件详细检查 ==="
+        echo "1. 搜索内核镜像:"
+        find out/ -name "Image*" -o -name "vmlinux*" -o -name "*.gz" -o -name "*.img" 2>/dev/null | while read f; do
+          echo "   ✅ $f ($(du -h "$f" 2>/dev/null | cut -f1 || echo '未知'))"
+        done || echo "   未找到内核镜像"
+        
+        echo "2. out 目录结构:"
+        find out/ -type f -name "*" 2>/dev/null | head -30 || echo "   out 目录为空"
+        
+        echo "3. 检查编译状态:"
+        if find out/ -name "vmlinux" 2>/dev/null | grep -q .; then
+          echo "   ✅ vmlinux 已生成"
+          vmlinux_path=$(find out/ -name "vmlinux" | head -1)
+          echo "   路径: $vmlinux_path"
+          file "$vmlinux_path" 2>/dev/null || echo "   无法分析文件"
         else
-          echo "无完整编译日志"
+          echo "   ❌ vmlinux 未生成"
         fi
+
+    - name: Generate kernel image if needed
+      if: failure()
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 尝试手动生成内核镜像 ==="
         
-        if [ -f "compile-test.log" ]; then
-          echo "编译测试错误:"
-          grep "error:" compile-test.log | tail -5 || echo "无错误"
+        # 如果编译失败但有 vmlinux，尝试手动生成 Image
+        if [ -f "out/vmlinux" ]; then
+          echo "找到 vmlinux，尝试生成 Image..."
+          mkdir -p out/arch/arm64/boot
+          aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image 2>/dev/null && {
+            echo "✅ 成功生成 Image"
+            gzip -k out/arch/arm64/boot/Image
+            echo "✅ 生成 Image.gz"
+            ls -lh out/arch/arm64/boot/Image.gz
+          } || echo "无法生成 Image"
+        else
+          echo "没有 vmlinux，无法手动生成内核镜像"
         fi
-        
-        echo "3. 检查生成的内核文件:"
-        find out/ -name "vmlinux" -o -name "Image*" -o -name "*.gz" -o -name "*.img" 2>/dev/null | while read f; do
-          echo "找到: $f"
-        done || echo "无内核文件"
 
-    - name: Upload diagnostics
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-diagnostics-${{ github.run_number }}
-        path: |
-          ${{ env.KERNEL_DIR }}/compile-test.log
-          ${{ env.KERNEL_DIR }}/full-build.log
-          ${{ env.KERNEL_DIR }}/out/.config
-        retention-days: 15
-
-    - name: Upload kernel if exists
+    - name: Upload kernel artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-output-${{ github.run_number }}
+        name: kernel-final-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
           ${{ env.KERNEL_DIR }}/out/vmlinux
         retention-days: 30
+
+    - name: Upload build logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs-final-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/build.log
+          ${{ env.KERNEL_DIR }}/out/.config
+        retention-days: 15
+
+    - name: Final success message
+      if: success()
+      run: |
+        cd $KERNEL_DIR
+        echo "🎉 🎉 🎉 内核编译完成！"
+        echo "生成的文件:"
+        find out/ -name "Image*" -o -name "vmlinux*" -o -name "*.gz" -o -name "*.img" 2>/dev/null | while read f; do
+          echo "   📄 $f ($(du -h "$f" 2>/dev/null | cut -f1))"
+        done
+        echo ""
+        echo "下一步:"
+        echo "1. 下载 Artifacts 中的 kernel-final-*"
+        echo "2. 使用 Image.gz 刷入设备"
+        echo "3. 如果刷入失败，检查 build-logs-final-* 中的错误信息"
