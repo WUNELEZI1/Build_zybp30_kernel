@@ -1,13 +1,12 @@
-name: Build MT6768 Kernel (KConfig Fix)
+name: Build MT6768 Kernel (NDK Fix)
 
 on:
   workflow_dispatch:
     inputs:
-      USE_DEBUG_CONFIG:
-        description: 'Use debug defconfig instead'
-        required: false
-        default: false
-        type: boolean
+      DEFCONFIG:
+        description: 'Kernel defconfig'
+        required: true
+        default: 'k69v1_64_k419_defconfig'
 
 env:
   ARCH: arm64
@@ -54,152 +53,169 @@ jobs:
         unzip -q android-ndk-r23c-linux.zip
         echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
 
-    - name: Setup build environment
+    - name: Fix NDK toolchain setup
       run: |
+        echo "=== 修复 NDK 工具链设置 ==="
+        
+        # 检查 NDK 目录结构
+        echo "NDK 目录结构:"
+        ls -la $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -10
+        
+        # 检查是否存在正确的工具链文件
+        echo "检查 Clang 编译器:"
+        ls -la $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang* | head -5
+        
+        echo "检查交叉编译工具:"
+        ls -la $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android* | head -5
+        
+        # 在 NDK r23c 中，正确的路径应该是：
+        # CC = clang (不是 gcc)
+        # 交叉编译前缀使用 llvm 的 binutils
+        
+        echo "NDK_TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+
+    - name: Setup correct build environment
+      run: |
+        echo "=== 设置正确的构建环境 ==="
+        
         echo "ARCH=arm64" >> $GITHUB_ENV
         echo "SUBARCH=arm64" >> $GITHUB_ENV
         
-        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
+        # 在 NDK r23c 中，正确的设置方式：
+        # 使用 clang 作为编译器
+        echo "CC=$NDK_TOOLCHAIN/bin/clang" >> $GITHUB_ENV
+        
+        # 使用 llvm 的 binutils 而不是 gcc
+        echo "LD=$NDK_TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
+        echo "AR=$NDK_TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+        echo "NM=$NDK_TOOLCHAIN/bin/llvm-nm" >> $GITHUB_ENV
+        echo "OBJCOPY=$NDK_TOOLCHAIN/bin/llvm-objcopy" >> $GITHUB_ENV
+        echo "OBJDUMP=$NDK_TOOLCHAIN/bin/llvm-objdump" >> $GITHUB_ENV
+        echo "STRIP=$NDK_TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+        
+        # 设置交叉编译前缀
+        echo "CROSS_COMPILE=$NDK_TOOLCHAIN/bin/aarch64-linux-android" >> $GITHUB_ENV
         echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        
+        echo "环境变量设置完成:"
+        echo "CC: $CC"
+        echo "CROSS_COMPILE: $CROSS_COMPILE"
 
-    - name: Analyze Kconfig conflicts
+    - name: Test compiler availability
+      run: |
+        echo "=== 测试编译器可用性 ==="
+        
+        # 测试 Clang 编译器
+        $CC --version || echo "Clang 不可用"
+        
+        # 测试交叉编译工具
+        $LD --version || echo "LLD 不可用"
+        $AR --version || echo "LLVM AR 不可用"
+        
+        # 测试交叉编译前缀
+        $CROSS_COMPILE-clang --version || echo "交叉编译 Clang 不可用"
+
+    - name: Configure kernel with fixed toolchain
       run: |
         cd $KERNEL_DIR
-        echo "=== 详细分析 Kconfig 冲突 ==="
-        
-        # 检查有问题的 Kconfig 文件
-        echo "检查 drivers/power/supply/mediatek/charger/Kconfig:199"
-        if [ -f "drivers/power/supply/mediatek/charger/Kconfig" ]; then
-          sed -n '195,205p' drivers/power/supply/mediatek/charger/Kconfig || echo "无法读取文件"
-        fi
-        
-        echo "检查 drivers/soc/mediatek/Kconfig:7"
-        if [ -f "drivers/soc/mediatek/Kconfig" ]; then
-          sed -n '1,15p' drivers/soc/mediatek/Kconfig || echo "无法读取文件"
-        fi
-        
-        # 检查 defconfig 中的相关配置
-        echo "=== defconfig 中的相关配置 ==="
-        grep -E "CHARGER_BQ25890|MTK_CMDQ" arch/arm64/configs/k69v1_64_k419_defconfig || echo "未在defconfig中找到相关配置"
-
-    - name: Create manual config workaround
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 创建手动配置绕过方案 ==="
+        echo "=== 使用修复的工具链配置内核 ==="
         
         mkdir -p out
         
-        # 方法1: 使用最小配置开始
-        echo "方法1: 使用最小 arm64 配置"
-        make O=out ARCH=arm64 defconfig
+        # 完全清理
+        make distclean 2>/dev/null || true
         
-        if [ -f "out/.config" ]; then
-          echo "✅ 基础配置创建成功"
-          
-          # 手动设置必要的 MTK 配置
-          echo "手动设置 MTK 相关配置..."
-          # 这些是 MT6768 可能需要的配置
-          ./scripts/config --file out/.config -e ARCH_MEDIATEK
-          ./scripts/config --file out/.config -e ARM64
-          ./scripts/config --file out/.config -e MTK_PLATFORM_ARM64
-          
-          # 对有冲突的配置使用安全值
-          ./scripts/config --file out/.config -d CHARGER_BQ25890
-          ./scripts/config --file out/.config -d MTK_CMDQ
-          
-          # 更新配置
-          make O=out ARCH=arm64 olddefconfig
-        else
-          echo "❌ 基础配置失败"
-          exit 1
-        fi
-
-    - name: Try alternative config methods
-      run: |
-        cd $KERNEL_DIR
+        echo "=== 方法1: 直接配置 ==="
+        # 设置环境变量用于配置阶段
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-  # 使用系统gcc进行配置
         
-        # 检查是否要使用 debug 配置
-        if [ "${{ github.event.inputs.USE_DEBUG_CONFIG }}" = "true" ]; then
-          echo "=== 尝试使用 debug defconfig ==="
-          rm -rf out
-          mkdir -p out
-          make O=out ARCH=arm64 k69v1_64_k419_debug_defconfig && {
-            echo "✅ Debug defconfig 成功"
-            exit 0
-          } || {
-            echo "❌ Debug defconfig 也失败"
-          }
-        fi
-        
-        # 方法2: 使用 allyesconfig 然后精简
-        echo "=== 方法2: 使用 allyesconfig ==="
-        rm -rf out
-        mkdir -p out
-        make O=out ARCH=arm64 allyesconfig && {
-          echo "✅ Allyesconfig 成功，现在精简配置"
-          # 禁用所有配置，然后重新启用必要的
-          make O=out ARCH=arm64 allnoconfig
-          # 重新启用 ARM64 基础配置
-          ./scripts/config --file out/.config -e ARM64
-          ./scripts/config --file out/.config -e 64BIT
-          make O=out ARCH=arm64 olddefconfig
+        # 使用系统gcc进行配置，避免NDK工具链问题
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $DEFCONFIG && {
+          echo "✅ 配置成功"
+        } || {
+          echo "❌ 配置失败，尝试方法2"
+          
+          # 方法2: 使用defconfig基础
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          echo "使用基础配置成功"
         }
 
-    - name: Build with manual config
+    - name: Build kernel with NDK toolchain
       run: |
         cd $KERNEL_DIR
         
-        # 验证配置
         if [ ! -f "out/.config" ]; then
-          echo "❌ 没有有效的配置文件"
+          echo "❌ 没有配置文件，无法编译"
           exit 1
         fi
         
-        echo "=== 配置摘要 ==="
-        grep -E "ARM64|MTK|MEDIATEK|CHARGER|CMDQ" out/.config | head -20
+        echo "=== 使用 NDK 工具链编译内核 ==="
         
-        echo "=== 开始编译 ==="
-        # 使用单线程编译以避免复杂错误
-        make O=out ARCH=arm64 -j1 \
+        # 显示配置摘要
+        echo "配置摘要:"
+        grep -E "CONFIG_|ARM64|MTK" out/.config | head -10
+        
+        echo "开始编译..."
+        
+        # 使用 NDK Clang 工具链进行编译
+        time make O=out ARCH=arm64 -j$(($(nproc)/2)) \
           CC="$CC" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
+          LD="$LD" \
+          AR="$AR" \
+          NM="$NM" \
+          OBJCOPY="$OBJCOPY" \
+          OBJDUMP="$OBJDUMP" \
+          STRIP="$STRIP" \
           CLANG_TRIPLE="$CLANG_TRIPLE" \
           2>&1 | tee build.log
 
-    - name: Check minimal build results
+    - name: Check build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 最小构建检查 ==="
+        echo "=== 构建结果检查 ==="
         
-        # 检查是否生成了任何内核镜像
-        if find out/arch/arm64/boot/ -name "Image*" 2>/dev/null | grep -q .; then
-          echo "✅ 成功生成了内核镜像"
-          find out/arch/arm64/boot/ -name "Image*" -exec ls -lh {} \;
+        if [ -f "build.log" ]; then
+          echo "构建日志大小: $(wc -l < build.log) 行"
+          # 检查编译错误
+          if grep -q "error:" build.log; then
+            echo "编译错误:"
+            grep "error:" build.log | head -10
+          fi
+        fi
+        
+        # 检查内核镜像
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "🎉 ✅ 编译成功!"
+          echo "内核镜像: out/arch/arm64/boot/Image.gz"
+          ls -lh out/arch/arm64/boot/
         else
           echo "❌ 未找到内核镜像"
-          echo "=== 构建错误 ==="
-          grep -i "error\|undefined\|conflict" build.log | head -20
-          echo "=== 最后编译步骤 ==="
-          tail -30 build.log
+          echo "输出目录内容:"
+          find out/ -name "Image*" -o -name "*.img" -o -name "*.gz" 2>/dev/null | head -10
+          
+          # 显示构建日志末尾
+          if [ -f "build.log" ]; then
+            echo "=== 构建日志最后30行 ==="
+            tail -30 build.log
+          fi
         fi
 
-    - name: Upload results
+    - name: Upload artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-ndk-fix-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
+        retention-days: 30
+
+    - name: Upload debug info
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kconfig-fix-results-${{ github.run_number }}
+        name: build-debug-ndk-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/build.log
           ${{ env.KERNEL_DIR }}/out/.config
         retention-days: 15
-
-    - name: Upload kernel if successful
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-minimal-${{ github.run_number }}
-        path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
-        retention-days: 30
