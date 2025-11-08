@@ -1,0 +1,115 @@
+name: Build MT6768 Kernel
+
+on:
+  workflow_dispatch:  # 仅手动触发，避免自动排队
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout this repo
+      uses: actions/checkout@v4
+
+    - name: Setup environment
+      run: |
+        echo "Build started at: $(date)"
+        echo "Runner OS: $RUNNER_OS"
+        echo "Runner Name: $RUNNER_NAME"
+        
+    - name: Install essential dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          bc \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          git \
+          wget \
+          unzip \
+          make \
+          gcc-aarch64-linux-gnu
+
+    - name: Clone kernel source
+      run: |
+        git clone --depth=1 --branch=mt6768-4.19 \
+          https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
+          kernel-source
+        echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
+
+    - name: Download Android NDK
+      run: |
+        wget -q --show-progress \
+          https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
+        unzip -q android-ndk-r23c-linux.zip
+        echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
+
+    - name: Configure build environment
+      run: |
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "SUBARCH=arm64" >> $GITHUB_ENV
+        
+        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
+        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+
+    - name: Verify kernel config
+      run: |
+        cd $KERNEL_DIR
+        echo "Checking for defconfig files..."
+        ls -la arch/arm64/configs/ | grep k69 || echo "No k69 configs found"
+        
+        if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
+          echo "✅ Found k69v1_64_k419_defconfig"
+          echo "DEFCONFIG=k69v1_64_k419_defconfig" >> $GITHUB_ENV
+        else
+          echo "❌ k69v1_64_k419_defconfig not found"
+          exit 1
+        fi
+
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+        echo "Starting kernel build with $DEFCONFIG..."
+        
+        # Clean previous builds
+        rm -rf out
+        
+        # Configure kernel
+        make O=out ARCH=arm64 $DEFCONFIG
+        
+        # Build kernel with limited jobs to avoid memory issues
+        make O=out ARCH=arm64 -j2 \
+          CC="$CC" \
+          CROSS_COMPILE="$CROSS_COMPILE" \
+          CLANG_TRIPLE="$CLANG_TRIPLE"
+
+    - name: Check build results
+      run: |
+        cd $KERNEL_DIR
+        echo "Build results:"
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "✅ SUCCESS: Kernel Image.gz found!"
+          ls -lh out/arch/arm64/boot/
+        else
+          echo "❌ FAILED: No kernel image produced"
+          echo "Available files in output:"
+          find out/ -type f -name "*" 2>/dev/null | head -20 || true
+          exit 1
+        fi
+
+    - name: Upload artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build
+        path: |
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
+        retention-days: 7
