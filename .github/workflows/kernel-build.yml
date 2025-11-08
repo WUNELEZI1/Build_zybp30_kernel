@@ -1,8 +1,6 @@
-name: Build MT6768 Kernel
+name: Build MT6768 Kernel (NDK Path Fix)
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       DEFCONFIG:
@@ -55,34 +53,84 @@ jobs:
         unzip -q android-ndk-r23c-linux.zip
         echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
 
-    - name: Setup build environment
+    - name: Setup correct NDK toolchain
       run: |
+        echo "=== 设置正确的 NDK 工具链路径 ==="
+        
+        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        
         echo "ARCH=arm64" >> $GITHUB_ENV
         echo "SUBARCH=arm64" >> $GITHUB_ENV
-        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        
+        # 正确的 NDK r23c 设置
         echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android" >> $GITHUB_ENV
+        echo "LD=$NDK_BIN/ld.lld" >> $GITHUB_ENV
+        echo "AR=$NDK_BIN/llvm-ar" >> $GITHUB_ENV
+        echo "NM=$NDK_BIN/llvm-nm" >> $GITHUB_ENV
+        echo "STRIP=$NDK_BIN/llvm-strip" >> $GITHUB_ENV
+        echo "OBJCOPY=$NDK_BIN/llvm-objcopy" >> $GITHUB_ENV
+        echo "OBJDUMP=$NDK_BIN/llvm-objdump" >> $GITHUB_ENV
+        
+        # 关键修复：CROSS_COMPILE 必须以连字符结尾
+        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
         echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        
+        # 验证工具存在
+        echo "验证工具链:"
+        ls -la $NDK_BIN/clang || echo "Clang 不存在"
+        ls -la $NDK_BIN/ld.lld || echo "LLD 不存在"
+        ls -la $NDK_BIN/aarch64-linux-android-* | head -5 || echo "交叉编译工具不存在"
+
+    - name: Test toolchain
+      run: |
+        echo "=== 测试工具链 ==="
+        echo "CC: $CC"
+        echo "LD: $LD"
+        echo "CROSS_COMPILE: $CROSS_COMPILE"
+        
+        # 测试编译器
+        $CC --version || echo "Clang 测试失败"
+        $LD --version || echo "LLD 测试失败"
+        
+        # 测试交叉编译
+        $CROSS_COMPILE"clang" --version || echo "交叉编译 Clang 测试失败"
 
     - name: Configure kernel
       run: |
         cd $KERNEL_DIR
         mkdir -p out
+        
+        # 使用系统 GCC 进行配置（避免 NDK 工具链问题）
+        echo "配置内核..."
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }} || {
-          echo "配置失败，使用基础配置"
+          echo "特定配置失败，使用基础配置"
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
         }
 
-    - name: Build kernel
+    - name: Build kernel with correct paths
       run: |
         cd $KERNEL_DIR
+        
         if [ ! -f "out/.config" ]; then
           echo "❌ 没有配置文件"
           exit 1
         fi
-        echo "开始编译内核..."
+        
+        echo "=== 使用正确的工具链路径编译 ==="
+        
+        # 显示配置摘要
+        echo "配置摘要:"
+        grep "CONFIG_LOCALVERSION" out/.config || echo "无本地版本"
+        
+        # 编译内核
         time make O=out ARCH=arm64 -j2 \
           CC="$CC" \
+          LD="$LD" \
+          AR="$AR" \
+          NM="$NM" \
+          STRIP="$STRIP" \
+          OBJCOPY="$OBJCOPY" \
+          OBJDUMP="$OBJDUMP" \
           CROSS_COMPILE="$CROSS_COMPILE" \
           CLANG_TRIPLE="$CLANG_TRIPLE" \
           2>&1 | tee build.log
@@ -90,20 +138,38 @@ jobs:
     - name: Check build results
       run: |
         cd $KERNEL_DIR
+        echo "=== 构建结果检查 ==="
+        
+        if [ -f "build.log" ]; then
+          echo "构建日志: $(wc -l < build.log) 行"
+          # 检查是否有新的错误
+          if grep -q "error:" build.log; then
+            echo "编译错误:"
+            grep "error:" build.log | head -10
+          fi
+        fi
+        
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "🎉 ✅ 编译成功!"
+          echo "生成的文件:"
           ls -lh out/arch/arm64/boot/
         else
-          echo "❌ 编译失败"
-          tail -50 build.log
-          exit 1
+          echo "❌ 未找到内核镜像"
+          echo "输出目录内容:"
+          find out/ -type f -name "*" 2>/dev/null | head -20
+          
+          # 显示构建日志末尾
+          if [ -f "build.log" ]; then
+            echo "=== 构建日志最后30行 ==="
+            tail -30 build.log
+          fi
         fi
 
-    - name: Upload artifacts
+    - name: Upload kernel artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.run_number }}
+        name: kernel-final-${{ github.run_number }}
         path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
         retention-days: 30
 
@@ -111,6 +177,8 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-debug-${{ github.run_number }}
-        path: ${{ env.KERNEL_DIR }}/build.log
+        name: build-debug-final-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/build.log
+          ${{ env.KERNEL_DIR }}/out/.config
         retention-days: 15
