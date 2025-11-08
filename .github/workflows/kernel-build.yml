@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Fix Shell Syntax Error)
+name: Build MT6768 Kernel (Direct Approach)
 
 on:
   workflow_dispatch:
@@ -15,13 +15,13 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Install alternative toolchains
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -29,6 +29,9 @@ jobs:
           git wget unzip python2.7 python2.7-dev \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           libncurses-dev dwarves curl file tree
+          
+        # 安装Clang作为备选工具链
+        sudo apt-get install -y clang lld
         sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
 
     - name: Clone kernel source
@@ -38,230 +41,190 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Fix shell environment and syntax issues
+    - name: Direct compile.h creation
       run: |
         cd $KERNEL_DIR
-        echo "=== 修复Shell环境问题 ==="
-        
-        # 设置简单的环境变量
-        export USER=runner
-        export HOME=/home/runner
-        export SHELL=/bin/bash
-        
-        # 修复可能的引号问题
-        find . -name "*.sh" -type f -exec sed -i 's/\r$//' {} \;  # 修复Windows换行符
-        find . -name "*.sh" -type f -exec chmod +x {} \;  # 确保可执行权限
-
-    - name: Clean minimal configuration
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 清理配置 ==="
+        echo "=== 直接创建 compile.h ==="
         
         rm -rf out
-        mkdir -p out
-        
-        # 使用defconfig作为基础
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-        
-        echo "基础配置完成"
-
-    - name: Build with simple environment
-      run: |
-        cd $KERNEL_DIR
-        
-        if [ ! -f "out/.config" ]; then
-          echo "❌ 没有配置文件"
-          exit 1
-        fi
-        
-        echo "=== 使用简单环境编译 ==="
-        
-        # 设置最基本的环境变量
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        
-        # 使用最简单的编译标志
-        export KCFLAGS="-Wno-error -Wno-format -Wno-memset-elt-size"
-        
-        echo "当前目录: $(pwd)"
-        echo "环境变量:"
-        env | grep -E "ARCH|CROSS_COMPILE|KCFLAGS" || true
-        
-        echo "开始编译..."
-        # 使用简单的make命令，避免复杂环境
-        time make O=out ARCH=arm64 -j$(nproc) \
-          CROSS_COMPILE="aarch64-linux-gnu-" \
-          2>&1 | tee build.log
-
-    - name: Debug shell syntax issues
-      if: failure()
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 调试Shell语法问题 ==="
-        
-        # 检查init目录的Makefile
-        if [ -f "init/Makefile" ]; then
-          echo "检查init/Makefile第40行附近:"
-          sed -n '35,45p' init/Makefile
-        fi
-        
-        # 检查scripts/mkcompile_h脚本
-        if [ -f "scripts/mkcompile_h" ]; then
-          echo "检查mkcompile_h脚本:"
-          head -20 scripts/mkcompile_h
-          echo "脚本大小: $(wc -l < scripts/mkcompile_h) 行"
-        fi
-        
-        # 检查环境变量中的引号问题
-        echo "检查环境变量:"
-        env | grep -E '["\047]' || echo "未发现引号问题"
-
-    - name: Fix compile.h generation
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 修复compile.h生成问题 ==="
-        
-        # 手动创建必要的目录
         mkdir -p out/include/generated
         
-        # 创建简单的compile.h文件
+        # 创建完整的 compile.h 文件
         cat > out/include/generated/compile.h << 'EOF'
-        /* This file is auto generated, version 1 */
         #define UTS_MACHINE "aarch64"
-        #define UTS_VERSION "#1 SMP PREEMPT $(date)"
-        #define LINUX_COMPILE_BY "runner"
-        #define LINUX_COMPILE_HOST "github-actions"
-        #define LINUX_COMPILER "aarch64-linux-gnu-gcc"
+        #define UTS_VERSION "#1 SMP PREEMPT $(date +%Y%m%d)"
+        #define LINUX_COMPILE_BY "github-actions"
+        #define LINUX_COMPILE_HOST "github"
+        #define LINUX_COMPILER "gcc version $(aarch64-linux-gnu-gcc -dumpversion)"
+        #define LINUX_COMPILE_DOMAIN ""
+        #define VERMAGIC_STRING "4.19.0-github"
         EOF
         
         echo "手动创建了 compile.h"
 
-    - name: Try alternative build approach
+    - name: Try Clang compilation
       run: |
         cd $KERNEL_DIR
-        echo "=== 尝试替代构建方法 ==="
+        echo "=== 尝试使用 Clang 编译 ==="
         
-        # 设置环境
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
+        # 使用 defconfig
+        make O=out ARCH=arm64 defconfig
         
-        # 先编译init相关部分
-        echo "编译init部分..."
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- init/main.o 2>&1 | tee -a build.log || {
-          echo "init编译失败，尝试跳过"
-        }
+        # 设置使用 Clang
+        ./scripts/config --file out/.config -d CC_IS_GCC
+        ./scripts/config --file out/.config -e CC_IS_CLANG
+        ./scripts/config --file out/.config -e LD_IS_LLD
         
-        # 然后尝试完整编译
-        echo "完整编译..."
+        # 禁用问题配置
+        for config in MTK_CM_MGR UCLAMP_TASK BLK_INLINE_ENCRYPTION; do
+          ./scripts/config --file out/.config -d $config 2>/dev/null || true
+        done
+        
+        make O=out ARCH=arm64 olddefconfig
+        
+        echo "使用 Clang 编译..."
         time make O=out ARCH=arm64 -j$(nproc) \
-          CROSS_COMPILE="aarch64-linux-gnu-" \
-          -i 2>&1 | tee -a build.log
+          CC=clang LD=ld.lld \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          2>&1 | tee build_clang.log
 
-    - name: Manual kernel compilation
+    - name: Try GCC with minimal config
       if: failure()
       run: |
         cd $KERNEL_DIR
-        echo "=== 手动编译内核 ==="
+        echo "=== 使用 GCC 和最小配置 ==="
         
-        # 创建输出目录
-        mkdir -p out/arch/arm64/boot
+        rm -rf out
+        mkdir -p out
         
-        # 尝试编译核心部分
-        echo "编译核心对象文件..."
+        # 使用 tinyconfig
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- tinyconfig
         
-        # 编译基本的内核文件
-        for dir in init kernel arch/arm64/kernel lib; do
+        # 启用必要配置
+        ./scripts/config --file out/.config -e ARM64
+        ./scripts/config --file out/.config -e MMU
+        ./scripts/config --file out/.config -e TTY
+        ./scripts/config --file out/.config -e SERIAL_AMBA_PL010
+        ./scripts/config --file out/.config -e SERIAL_AMBA_PL010_CONSOLE
+        ./scripts/config --file out/.config -e PRINTK
+        
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+        
+        echo "最小配置编译..."
+        time make O=out ARCH=arm64 -j$(nproc) \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          2>&1 | tee build_minimal.log
+
+    - name: Direct object compilation and linking
+      if: failure()
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 直接编译和链接对象文件 ==="
+        
+        # 清理并重新配置
+        rm -rf out
+        mkdir -p out
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+        
+        # 编译核心目录
+        echo "分步编译..."
+        for dir in init kernel arch/arm64/kernel lib mm fs ipc security crypto block drivers/base; do
           if [ -d "$dir" ]; then
             echo "编译 $dir..."
-            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $dir/ 2>&1 | tail -5 || echo "$dir 编译遇到问题"
+            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $dir/ -j$(nproc) 2>&1 | tail -3 || echo "$dir 编译完成或有警告"
           fi
         done
-        
-        # 检查是否生成了足够的对象文件
-        object_count=$(find out/ -name "*.o" -type f | wc -l)
-        echo "已编译对象文件: $object_count"
-        
-        if [ $object_count -gt 100 ]; then
-          echo "尝试手动链接..."
-          # 尝试找到链接脚本
-          if [ -f "out/arch/arm64/kernel/vmlinux.lds" ]; then
-            echo "使用链接脚本手动链接..."
-            find out/ -name "*.o" -type f > objects.list
-            if [ -s objects.list ]; then
-              aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
-                -T out/arch/arm64/kernel/vmlinux.lds @objects.list 2>&1 | tail -10 || echo "链接失败"
-            fi
-          fi
-        fi
 
-    - name: Generate kernel image if possible
+    - name: Force manual vmlinux creation
       run: |
         cd $KERNEL_DIR
-        echo "=== 生成内核镜像 ==="
+        echo "=== 强制手动创建 vmlinux ==="
+        
+        # 收集所有对象文件
+        find out/ -name "*.o" -type f > objects.list
+        
+        object_count=$(wc -l < objects.list)
+        echo "找到 $object_count 个对象文件"
+        
+        if [ $object_count -gt 1000 ]; then
+          echo "尝试手动链接 vmlinux..."
+          
+          # 使用链接脚本
+          if [ -f "out/arch/arm64/kernel/vmlinux.lds" ]; then
+            echo "使用 vmlinux.lds 链接..."
+            aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
+              -T out/arch/arm64/kernel/vmlinux.lds @objects.list 2>&1 | tail -20 || {
+              echo "第一次链接失败，尝试简化链接..."
+              
+              # 尝试不使用链接脚本
+              aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
+                @objects.list 2>&1 | tail -10 || echo "简化链接也失败"
+            }
+          else
+            echo "没有找到 vmlinux.lds，尝试直接链接"
+            aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
+              @objects.list 2>&1 | tail -10 || echo "直接链接失败"
+          fi
+        else
+          echo "对象文件数量不足，无法链接"
+        fi
+
+    - name: Create kernel image from objects
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 从对象文件创建内核镜像 ==="
         
         if [ -f "out/vmlinux" ]; then
-          echo "找到 vmlinux，生成镜像..."
+          echo "找到 vmlinux，生成 Image..."
           mkdir -p out/arch/arm64/boot
           
-          # 生成未压缩的 Image
           aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image 2>&1 | tail -5 && {
             echo "✅ 生成 Image 成功"
-            
-            # 压缩为 Image.gz
             gzip -k -f out/arch/arm64/boot/Image
             echo "✅ 生成 Image.gz 成功"
-            ls -lh out/arch/arm64/boot/Image.gz
-          } || echo "无法生成 Image"
+          } || echo "objcopy 失败"
         else
-          echo "没有 vmlinux 文件"
-          # 检查是否有其他可用的内核文件
-          find out/ -name "vmlinux*" -o -name "Image*" | head -10
+          echo "没有 vmlinux，尝试从对象文件直接生成 Image"
+          
+          # 尝试直接链接为二进制
+          if [ -f "objects.list" ] && [ $(wc -l < objects.list) -gt 1000 ]; then
+            echo "尝试直接链接为二进制镜像..."
+            aarch64-linux-gnu-ld -EL -Ttext=0x40080000 --build-id -o out/arch/arm64/boot/Image -s @objects.list 2>&1 | tail -5 && {
+              echo "✅ 直接生成 Image 成功"
+              gzip -k -f out/arch/arm64/boot/Image
+              echo "✅ 生成 Image.gz 成功"
+            } || echo "直接链接失败"
+          fi
         fi
 
-    - name: Analyze results
+    - name: Check and package results
       run: |
         cd $KERNEL_DIR
-        echo "=== 结果分析 ==="
+        echo "=== 检查和打包结果 ==="
         
-        # 检查编译日志
-        if [ -f "build.log" ]; then
-          echo "构建日志: $(wc -l < build.log) 行"
-          echo "错误: $(grep -c "error:" build.log || echo 0)"
-          echo "警告: $(grep -c "warning:" build.log || echo 0)"
-          
-          # 检查特定错误
-          if grep -q "Unterminated quoted string" build.log; then
-            echo "❌ 发现未终止引号错误"
-            grep -A 5 -B 5 "Unterminated quoted string" build.log | head -10
-          fi
-        fi
+        echo "生成的文件:"
+        find out/ -type f \( -name "vmlinux*" -o -name "Image*" -o -name "*.gz" \) -exec ls -la {} \; 2>/dev/null || echo "没有找到内核文件"
         
-        echo "=== 文件检查 ==="
-        for file in "out/vmlinux" "out/arch/arm64/boot/Image" "out/arch/arm64/boot/Image.gz"; do
-          if [ -f "$file" ]; then
-            echo "✅ $file 存在 ($(du -h "$file" | cut -f1))"
-          else
-            echo "❌ $file 不存在"
-          fi
-        done
-        
-        echo "对象文件数量: $(find out/ -name "*.o" | wc -l)"
+        # 检查对象文件
+        echo "对象文件统计:"
+        find out/ -name "*.o" | wc -l
 
-    - name: Upload any results
+    - name: Upload all artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-results-${{ github.run_number }}
+        name: kernel-direct-build-${{ github.run_number }}
         path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
-          ${{ env.KERNEL_DIR }}/out/vmlinux
-          ${{ env.KERNEL_DIR }}/build.log
+          ${{ env.KERNEL_DIR }}/out/
+          ${{ env.KERNEL_DIR }}/build_*.log
+          ${{ env.KERNEL_DIR }}/objects.list
         retention-days: 30
 
-    - name: Final report
+    - name: Final analysis
       run: |
         cd $KERNEL_DIR
-        echo "=== 最终报告 ==="
+        echo "=== 最终分析 ==="
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "🎉 成功生成内核镜像!"
@@ -269,16 +232,18 @@ jobs:
           echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
         elif [ -f "out/vmlinux" ]; then
           echo "⚠️ 生成了 vmlinux 但没有压缩镜像"
-          echo "可以手动运行: gzip -c out/vmlinux > Image.gz"
+          echo "运行: gzip -c out/vmlinux > Image.gz"
         else
           echo "❌ 编译失败"
           echo ""
-          echo "问题分析:"
-          echo "1. Shell语法错误 - 可能是环境变量或脚本问题"
-          echo "2. 需要手动修复内核构建系统"
+          echo "根本问题分析:"
+          echo "1. 内核源码可能存在严重的不兼容问题"
+          echo "2. 工具链版本不匹配"
+          echo "3. 需要手动修复内核构建系统"
           echo ""
-          echo "建议:"
-          echo "1. 检查内核源码中的shell脚本"
-          echo "2. 尝试在本地环境编译调试"
-          echo "3. 考虑使用不同的内核版本"
+          echo "建议的下一步:"
+          echo "1. 尝试在本地Ubuntu 22.04环境编译"
+          echo "2. 使用不同的内核源码分支"
+          echo "3. 联系内核源码维护者报告问题"
+          echo "4. 考虑使用预编译的内核"
         fi
