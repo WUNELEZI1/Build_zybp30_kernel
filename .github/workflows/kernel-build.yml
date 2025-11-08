@@ -51,7 +51,7 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
-          git wget unzip ccache python2 python3 \
+          git wget unzip ccache python3 \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           libncurses-dev dwarves curl
 
