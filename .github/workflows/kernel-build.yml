@@ -6,7 +6,7 @@ on:
       DEFCONFIG:
         description: 'Kernel defconfig'
         required: true
-        default: 'k69v1_64_k419_defconfig'
+        default: 'k69v1_64_k419_debug_defconfig'
 
 env:
   ARCH: arm64
