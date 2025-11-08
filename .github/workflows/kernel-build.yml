@@ -21,7 +21,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install Python 2.7
+    - name: Install Python 2.7 and dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y software-properties-common
@@ -38,7 +38,7 @@ jobs:
           git wget unzip ccache python3 \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           libncurses-dev dwarves curl lz4 lzop \
-          rsync kmod cpio
+          rsync kmod cpio file
 
     - name: Clone kernel source
       run: |
@@ -46,6 +46,28 @@ jobs:
           https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
+
+    - name: Debug kernel source structure
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 详细的内核源码分析 ==="
+        echo "当前目录: $(pwd)"
+        echo "=== 文件列表 ==="
+        ls -la
+        echo "=== 检查 Makefile ==="
+        head -20 Makefile || echo "无法读取 Makefile"
+        echo "=== 检查 defconfig 目录 ==="
+        ls -la arch/arm64/configs/ | head -20
+        echo "=== 检查指定的 defconfig 文件 ==="
+        if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
+          echo "✅ Defconfig 文件存在"
+          echo "文件内容前30行:"
+          head -30 arch/arm64/configs/k69v1_64_k419_defconfig
+        else
+          echo "❌ Defconfig 文件不存在"
+          echo "可用的 defconfig 文件:"
+          ls arch/arm64/configs/ | head -15
+        fi
 
     - name: Download Android NDK
       run: |
@@ -63,133 +85,112 @@ jobs:
         echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
         echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-    - name: Debug defconfig file
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 详细分析 defconfig 文件 ==="
-        
-        # 检查文件是否存在和大小
-        if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
-          echo "✅ Defconfig 文件存在"
-          echo "文件大小: $(wc -l < arch/arm64/configs/k69v1_64_k419_defconfig) 行"
-          echo "文件大小: $(wc -c < arch/arm64/configs/k69v1_64_k419_defconfig) 字节"
-          
-          # 检查文件编码
-          file arch/arm64/configs/k69v1_64_k419_defconfig
-          
-          # 检查文件开头和结尾
-          echo "=== 文件前10行 ==="
-          head -10 arch/arm64/configs/k69v1_64_k419_defconfig
-          echo "=== 文件最后10行 ==="
-          tail -10 arch/arm64/configs/k69v1_64_k419_defconfig
-          
-          # 检查是否有异常字符
-          echo "=== 检查异常字符 ==="
-          grep -n "[^[:print:]]" arch/arm64/configs/k69v1_64_k419_defconfig || echo "无异常字符"
-        else
-          echo "❌ Defconfig 文件不存在"
-          echo "可用的 defconfig 文件:"
-          ls -la arch/arm64/configs/ | head -15
-          exit 1
-        fi
-
     - name: Test kernel configuration step by step
       run: |
         cd $KERNEL_DIR
         
-        # 完全清理
-        echo "=== 执行完全清理 ==="
+        echo "=== 步骤1: 完全清理环境 ==="
         make distclean 2>/dev/null || true
         rm -rf out
-        
-        # 创建输出目录
         mkdir -p out
         
-        echo "=== 步骤1: 检查内核Makefile ==="
-        head -10 Makefile || echo "无法读取Makefile"
-        
-        echo "=== 步骤2: 尝试基本配置测试 ==="
-        # 先尝试一个最简单的配置
-        make ARCH=arm64 help | grep config || echo "无法获取配置帮助"
+        echo "=== 步骤2: 检查内核版本和架构支持 ==="
+        grep "VERSION\|PATCHLEVEL" Makefile || echo "无法读取版本信息"
         
         echo "=== 步骤3: 尝试不同的配置方法 ==="
         
-        # 方法1: 直接配置（带详细输出）
-        echo "尝试方法1: 直接配置"
+        # 方法1: 直接使用指定的defconfig
+        echo "🔧 尝试方法1: 直接配置"
         set -x
-        make O=out ARCH=arm64 V=1 k69v1_64_k419_defconfig || {
-          echo "方法1失败，退出代码: $?"
-          set +x
+        make O=out ARCH=arm64 k69v1_64_k419_defconfig
+        CONFIG_RESULT=$?
+        set +x
+        
+        if [ $CONFIG_RESULT -ne 0 ]; then
+          echo "方法1失败，尝试方法2..."
           
-          # 方法2: 先使用默认配置
-          echo "尝试方法2: 使用默认配置"
+          # 方法2: 使用通用defconfig
+          echo "🔧 尝试方法2: 使用通用defconfig"
           set -x
           make O=out ARCH=arm64 defconfig
           set +x
           
-          # 方法3: 手动合并配置
-          echo "尝试方法3: 手动合并配置"
-          if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
-            set -x
-            # 将自定义配置合并到默认配置
-            ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/k69v1_64_k419_defconfig
-            make O=out ARCH=arm64 olddefconfig
-            set +x
+          if [ -f "out/.config" ]; then
+            echo "✅ 通用配置成功，现在尝试合并自定义配置"
+            # 手动合并配置
+            if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
+              set -x
+              cat arch/arm64/configs/k69v1_64_k419_defconfig >> out/.config
+              make O=out ARCH=arm64 olddefconfig
+              set +x
+            fi
           fi
-        }
+        fi
         
-        echo "=== 配置完成检查 ==="
+        echo "=== 配置结果检查 ==="
         if [ -f "out/.config" ]; then
-          echo "✅ 配置成功，生成 .config 文件"
-          echo "配置文件大小: $(wc -l < out/.config) 行"
+          echo "✅ 配置成功!"
+          echo "配置文件行数: $(wc -l < out/.config)"
         else
-          echo "❌ 配置失败，未生成 .config 文件"
+          echo "❌ 所有配置方法都失败"
+          echo "检查错误信息..."
           exit 1
         fi
 
-    - name: Build kernel with fallback options
+    - name: Build kernel
       run: |
         cd $KERNEL_DIR
+        echo "=== 开始内核编译 ==="
         
-        # 如果上一步配置失败，尝试使用debug配置
+        # 检查是否已有配置文件
         if [ ! -f "out/.config" ]; then
-          echo "=== 使用备用debug配置 ==="
-          make O=out ARCH=arm64 k69v1_64_k419_debug_defconfig || {
-            echo "Debug配置也失败，尝试最简配置"
-            make O=out ARCH=arm64 defconfig
-          }
+          echo "❌ 没有找到配置文件，无法编译"
+          exit 1
         fi
         
-        echo "=== 开始编译内核 ==="
-        # 使用较少的并行任务避免内存问题
-        make O=out ARCH=arm64 -j2 \
+        echo "使用配置文件:"
+        grep "CONFIG_LOCALVERSION" out/.config || echo "无本地版本信息"
+        
+        # 开始编译，保存详细日志
+        time make O=out ARCH=arm64 -j$(($(nproc)/2)) \
           CC="$CC" \
           CROSS_COMPILE="$CROSS_COMPILE" \
           CLANG_TRIPLE="$CLANG_TRIPLE" \
-          2>&1 | tee build.log
+          V=1 2>&1 | tee build.log
 
-    - name: Check build artifacts
+    - name: Analyze build results
       if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 构建结果检查 ==="
+        echo "=== 构建结果详细分析 ==="
         
-        # 检查所有可能的输出文件
-        find out/ -name "*.gz" -o -name "*.img" -o -name "Image*" 2>/dev/null | while read file; do
-          if [ -f "$file" ]; then
-            echo "找到: $file ($(du -h "$file" | cut -f1))"
-          fi
+        # 检查构建日志
+        if [ -f "build.log" ]; then
+          echo "📄 构建日志存在，大小: $(wc -l < build.log) 行"
+          echo "=== 构建日志最后错误信息 ==="
+          grep -A 10 -B 5 -i "error\|fail\|stop" build.log | tail -50 || echo "无明确错误信息"
+        else
+          echo "❌ 构建日志不存在"
+        fi
+        
+        # 检查输出文件
+        echo "=== 输出目录内容 ==="
+        find out/ -type f -name "*.o" 2>/dev/null | head -5 || echo "无目标文件"
+        find out/ -type f -name "Image*" -o -name "*.img" -o -name "*.gz" 2>/dev/null | while read f; do
+          echo "找到: $f ($(du -h "$f" | cut -f1))"
         done
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "✅ 编译成功!"
+          echo "🎉 ✅ 编译成功! 找到内核镜像"
           ls -lh out/arch/arm64/boot/
         else
-          echo "❌ 未找到内核镜像"
-          echo "=== 构建日志最后100行 ==="
-          tail -100 build.log
-          echo "=== 检查配置错误 ==="
-          grep -i "error\|fail" build.log | head -20
+          echo "❌ 编译失败: 未找到内核镜像"
+          # 检查配置阶段是否成功
+          if [ -f "out/.config" ]; then
+            echo "ℹ️ 配置文件存在但编译失败"
+          else
+            echo "❌ 配置阶段就失败了"
+          fi
         fi
 
     - name: Upload debug information
@@ -202,7 +203,7 @@ jobs:
           ${{ env.KERNEL_DIR }}/out/.config
         retention-days: 15
 
-    - name: Upload kernel image
+    - name: Upload kernel artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
