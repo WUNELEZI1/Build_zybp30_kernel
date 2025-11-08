@@ -1,303 +1,85 @@
-name: Build MT6768 Android Kernel
+name: Build MT6768 Kernel
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
+    branches: [ main ]
   workflow_dispatch:
-    inputs:
-      clean_build:
-        description: '完全清理构建'
-        required: false
-        default: true
-        type: boolean
 
 env:
-  # 核心配置
   KERNEL_SOURCE: "https://github.com/NullableIsBellable/Gale-Kernel-Source.git"
   KERNEL_BRANCH: "mt6768-4.19"
-  NDK_VERSION: "r23c"
   DEFCONFIG: "k69v1_64_k419_defconfig"
-  
-  # 构建参数
-  ARCH: "arm64"
-  COMPILE_JOBS: 4  # 保守的并行编译任务数，提高稳定性
 
 jobs:
   build:
-    name: 编译MT6768内核
     runs-on: ubuntu-20.04
-    
-    steps:
-    - name: 检出工作流仓库
-      uses: actions/checkout@v4
-      
-    - name: 记录构建信息
-      run: |
-        echo "=== 内核构建信息 ==="
-        echo "设备: MT6768"
-        echo "Android版本: 12"
-        echo "内核版本: 4.19.191"
-        echo "Defconfig: $DEFCONFIG"
-        echo "架构: $ARCH"
-        echo "Ubuntu版本: $(lsb_release -d | cut -f2)"
-        echo "开始时间: $(date)"
-        echo "===================="
+    timeout-minutes: 45
 
-    - name: 安装编译依赖
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        # 基础编译工具
-        sudo apt-get install -y build-essential bc ccache
-        # 内核编译必需
-        sudo apt-get install -y bison flex libssl-dev libelf-dev
-        # 配置工具
-        sudo apt-get install -y libncurses-dev pkg-config
-        # 交叉编译工具
-        sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-        # 其他工具
-        sudo apt-get install -y python2 python3 git wget curl zip unzip
-        # 为旧内核可能需要的兼容性包
-        sudo apt-get install -y dwarves libssl1.1
-        
-        # 创建python2符号链接（部分旧构建脚本需要）
-        if ! command -v python2 &> /dev/null; then
-          sudo ln -sf /usr/bin/python2.7 /usr/bin/python2 || true
-        fi
-        
-        echo "依赖安装完成"
+        sudo apt-get install -y \
+          build-essential bc bison flex libssl-dev libelf-dev \
+          git wget unzip ccache
 
-    - name: 配置ccache缓存
-      uses: actions/cache@v3
-      with:
-        path: ~/.ccache
-        key: ${{ runner.os }}-ccache-kernel-${{ hashFiles('**/.github/workflows/*.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-ccache-kernel-
-
-    - name: 设置ccache
+    - name: Clone kernel source
       run: |
-        ccache -M 2G
-        ccache -s
-        echo "CCACHE_DIR=~/.ccache" >> $GITHUB_ENV
-
-    - name: 克隆内核源码
-      run: |
-        echo "正在克隆内核源码..."
         git clone --depth=1 --branch=$KERNEL_BRANCH $KERNEL_SOURCE kernel-source
-        echo "内核源码版本信息:"
-        cd kernel-source
-        git log -1 --oneline
-        echo "DEFCONFIG文件检查:"
-        ls -la arch/arm64/configs/ | grep k69 || echo "未找到k69配置文件"
-        [ -f "arch/arm64/configs/$DEFCONFIG" ] && echo "✅ 找到defconfig: $DEFCONFIG" || echo "❌ defconfig不存在: $DEFCONFIG"
+        echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: 下载Android NDK
+    - name: Download Android NDK
       run: |
-        echo "下载NDK $NDK_VERSION..."
-        wget -q --show-progress https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-linux.zip
-        unzip -q android-ndk-$NDK_VERSION-linux.zip
-        echo "NDK_PATH=$(pwd)/android-ndk-$NDK_VERSION" >> $GITHUB_ENV
-        echo "NDK下载完成"
+        wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
+        unzip -q android-ndk-r23c-linux.zip
+        echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
 
-    - name: 设置编译环境
+    - name: Setup build environment
       run: |
-        echo "设置编译环境变量..."
-        
-        # 基础架构设置
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-        echo "SUBARCH=$ARCH" >> $GITHUB_ENV
-        
-        # NDK工具链路径
-        NDK_PREBUILT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
-        
-        # Clang编译器
-        echo "CC=$NDK_PREBUILT/bin/clang" >> $GITHUB_ENV
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "CC=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-" >> $GITHUB_ENV
         echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-        
-        # LLVM工具链
-        echo "LD=$NDK_PREBUILT/bin/ld.lld" >> $GITHUB_ENV
-        echo "AR=$NDK_PREBUILT/bin/llvm-ar" >> $GITHUB_ENV
-        echo "NM=$NDK_PREBUILT/bin/llvm-nm" >> $GITHUB_ENV
-        echo "STRIP=$NDK_PREBUILT/bin/llvm-strip" >> $GITHUB_ENV
-        echo "OBJCOPY=$NDK_PREBUILT/bin/llvm-objcopy" >> $GITHUB_ENV
-        echo "OBJDUMP=$NDK_PREBUILT/bin/llvm-objdump" >> $GITHUB_ENV
-        
-        # 交叉编译工具
-        echo "CROSS_COMPILE=$NDK_PREBUILT/bin/aarch64-linux-android-" >> $GITHUB_ENV
-        echo "CROSS_COMPILE_ARM32=$NDK_PREBUILT/bin/arm-linux-androideabi-" >> $GITHUB_ENV
-        
-        # 构建标志
-        echo "KBUILD_BUILD_USER=github-action" >> $GITHUB_ENV
-        echo "KBUILD_BUILD_HOST=github" >> $GITHUB_ENV
-        
-        echo "环境变量设置完成"
 
-    - name: 清理构建环境
-      if: inputs.clean_build
+    - name: Configure kernel
       run: |
-        cd kernel-source
-        echo "执行完全清理..."
-        make clean && make mrproper || echo "清理完成或无需清理"
-        rm -rf out
-
-    - name: 配置内核
-      run: |
-        cd kernel-source
-        echo "配置内核使用 $DEFCONFIG..."
-        
-        # 创建输出目录
+        cd $KERNEL_DIR
         mkdir -p out
+        make O=out ARCH=arm64 $DEFCONFIG
+        echo "✅ Kernel configured successfully"
+
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+        echo "🚀 Starting kernel build..."
+        make O=out ARCH=arm64 -j$(nproc) \
+          CC="$CC" \
+          CROSS_COMPILE="$CROSS_COMPILE" \
+          CLANG_TRIPLE="$CLANG_TRIPLE"
+
+    - name: Check build results
+      run: |
+        cd $KERNEL_DIR
+        echo "📦 Build artifacts:"
+        ls -la out/arch/arm64/boot/ || echo "No output directory found"
         
-        # 应用defconfig
-        set -x
-        make O=out ARCH=$ARCH $DEFCONFIG
-        
-        # 验证配置
-        if [ -f "out/.config" ]; then
-          echo "✅ 内核配置成功"
-          echo "配置摘要:"
-          grep -E "CONFIG_(LOCALVERSION|VERSION|PATCHLEVEL|COMPILE_BY)=" out/.config || true
+        # Check for essential files
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "✅ SUCCESS: Kernel compiled successfully!"
+          echo "File size: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
         else
-          echo "❌ 内核配置失败"
+          echo "❌ FAILED: Kernel image not found"
           exit 1
         fi
 
-    - name: 编译内核
-      timeout-minutes: 60
-      run: |
-        cd kernel-source
-        echo "开始内核编译 (使用 $COMPILE_JOBS 个并行任务)..."
-        
-        # 使用ccache和详细输出进行编译
-        time make O=out ARCH=$ARCH -j$COMPILE_JOBS \
-          CC="ccache $CC" \
-          LD="$LD" \
-          AR="$AR" \
-          NM="$NM" \
-          STRIP="$STRIP" \
-          OBJCOPY="$OBJCOPY" \
-          OBJDUMP="$OBJDUMP" \
-          CLANG_TRIPLE="$CLANG_TRIPLE" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
-          CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-          V=1 2>&1 | tee build.log
-        
-        echo "编译完成，检查结果..."
-
-    - name: 验证编译产物
-      run: |
-        cd kernel-source
-        echo "=== 编译产物验证 ==="
-        
-        # 检查核心文件
-        KERNEL_FILES=(
-          "out/arch/arm64/boot/Image.gz"
-          "out/arch/arm64/boot/Image"
-          "out/arch/arm64/boot/Image.gz-dtb"
-          "out/arch/arm64/boot/dtbo.img"
-          "out/arch/arm64/boot/dtb.img"
-        )
-        
-        for file in "${KERNEL_FILES[@]}"; do
-          if [ -f "$file" ]; then
-            size=$(du -h "$file" | cut -f1)
-            echo "✅ $file ($size)"
-          else
-            echo "⚠️  $file (未找到)"
-          fi
-        done
-        
-        # 列出所有生成的文件
-        echo "所有生成的文件:"
-        find out/arch/arm64/boot/ -type f 2>/dev/null | while read f; do
-          echo "   📄 $f ($(du -h "$f" | cut -f1))"
-        done || echo "无输出文件"
-        
-        # 检查模块
-        MODULE_COUNT=$(find out -name "*.ko" 2>/dev/null | wc -l)
-        echo "内核模块数量: $MODULE_COUNT"
-
-    - name: 收集构建信息
-      if: success()
-      run: |
-        cd kernel-source
-        echo "收集构建信息..."
-        
-        # 创建版本信息文件
-        {
-          echo "MT6768 内核构建报告"
-          echo "===================="
-          echo "构建时间: $(date)"
-          echo "Git提交: $(git log -1 --oneline || echo '未知')"
-          echo "Defconfig: $DEFCONFIG"
-          echo "编译器: $($CC --version | head -1 || echo '未知')"
-          echo "架构: $ARCH"
-          echo "Android版本: 12"
-          echo "内核版本: 4.19.191"
-        } > build-info.txt
-        
-        cat build-info.txt
-
-    - name: 打包编译产物
-      if: success()
-      run: |
-        cd kernel-source
-        echo "打包编译产物..."
-        
-        # 创建发布目录
-        mkdir -p kernel-release
-        
-        # 复制内核镜像
-        cp out/arch/arm64/boot/Image.gz kernel-release/ 2>/dev/null || true
-        cp out/arch/arm64/boot/Image kernel-release/ 2>/dev/null || true
-        cp out/arch/arm64/boot/Image.gz-dtb kernel-release/ 2>/dev/null || true
-        cp out/arch/arm64/boot/dtbo.img kernel-release/ 2>/dev/null || true
-        cp out/arch/arm64/boot/dtb.img kernel-release/ 2>/dev/null || true
-        
-        # 复制重要模块
-        mkdir -p kernel-release/modules
-        find out -name "*.ko" -exec cp {} kernel-release/modules/ \; 2>/dev/null || true
-        
-        # 复制构建日志和信息
-        cp build.log kernel-release/ 2>/dev/null || true
-        cp build-info.txt kernel-release/
-        
-        # 创建打包文件
-        RELEASE_NAME="kernel-mt6768-$(date +%Y%m%d-%H%M%S)"
-        zip -r $RELEASE_NAME.zip kernel-release/
-        echo "RELEASE_FILE=$RELEASE_NAME.zip" >> $GITHUB_ENV
-        
-        echo "打包完成: $RELEASE_NAME.zip"
-
-    - name: 上传内核产物
+    - name: Upload kernel image
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.sha }}
+        name: kernel-image
         path: |
-          kernel-source/${{ env.RELEASE_FILE }}
-          kernel-source/kernel-release/
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtbo.img
         retention-days: 30
-        if-no-files-found: error
-
-    - name: 上传构建日志
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-logs-${{ github.sha }}
-        path: |
-          kernel-source/build.log
-          kernel-source/build-info.txt
-        retention-days: 15
-
-    - name: 构建完成通知
-      if: always()
-      run: |
-        if [ "${{ job.status }}" == "success" ]; then
-          echo "🎉 内核编译成功!"
-          echo "产物: $RELEASE_FILE"
-        else
-          echo "❌ 内核编译失败!"
-          echo "请检查构建日志了解详细错误"
-        fi
