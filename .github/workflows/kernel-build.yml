@@ -1,115 +1,168 @@
-name: Build MT6768 Kernel
+name: Build MT6768 Kernel (Optimized)
 
 on:
-  workflow_dispatch:  # 仅手动触发，避免自动排队
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      KERNEL_SOURCE_URL:
+        description: 'Kernel source URL'
+        required: true
+        default: 'https://github.com/NullableIsBellable/Gale-Kernel-Source.git'
+      KERNEL_BRANCH:
+        description: 'Kernel branch'
+        required: true
+        default: 'mt6768-4.19'
+      DEFCONFIG:
+        description: 'Kernel defconfig'
+        required: true
+        default: 'k69v1_64_k419_defconfig'
+      NDK_VERSION:
+        description: 'Android NDK version'
+        required: true
+        default: 'r23c'
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
 
 jobs:
   build:
     runs-on: ubuntu-20.04
-    timeout-minutes: 30
-
+    timeout-minutes: 60
+    
     steps:
+    - name: Display Run Parameters
+      run: |
+        echo "::group::Build Environment Variables"
+        echo "Kernel Source: ${{ github.event.inputs.KERNEL_SOURCE_URL }}"
+        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_BRANCH }}"
+        echo "Defconfig: ${{ github.event.inputs.DEFCONFIG }}"
+        echo "NDK Version: ${{ github.event.inputs.NDK_VERSION }}"
+        echo "Architecture: $ARCH"
+        echo "::endgroup::"
+
     - name: Checkout this repo
       uses: actions/checkout@v4
 
-    - name: Setup environment
-      run: |
-        echo "Build started at: $(date)"
-        echo "Runner OS: $RUNNER_OS"
-        echo "Runner Name: $RUNNER_NAME"
-        
-    - name: Install essential dependencies
+    - name: Cleanup Workspace
+      uses: rokibhasansagar/slimhub_actions@main
+
+    - name: Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          build-essential \
-          bc \
-          bison \
-          flex \
-          libssl-dev \
-          libelf-dev \
-          git \
-          wget \
-          unzip \
-          make \
-          gcc-aarch64-linux-gnu
+          build-essential bc bison flex libssl-dev libelf-dev \
+          git wget unzip ccache python2 python3 \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          libncurses-dev dwarves curl
 
-    - name: Clone kernel source
-      run: |
-        git clone --depth=1 --branch=mt6768-4.19 \
-          https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
-          kernel-source
-        echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
+    - name: Setup Java Environment
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '11'
 
     - name: Download Android NDK
       run: |
-        wget -q --show-progress \
-          https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
-        unzip -q android-ndk-r23c-linux.zip
-        echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
+        wget -q https://dl.google.com/android/repository/android-ndk-${{ github.event.inputs.NDK_VERSION }}-linux.zip
+        unzip -q android-ndk-${{ github.event.inputs.NDK_VERSION }}-linux.zip
+        echo "NDK_PATH=$(pwd)/android-ndk-${{ github.event.inputs.NDK_VERSION }}" >> $GITHUB_ENV
 
-    - name: Configure build environment
+    - name: Clone Kernel Source
       run: |
-        echo "ARCH=arm64" >> $GITHUB_ENV
-        echo "SUBARCH=arm64" >> $GITHUB_ENV
-        
-        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
-        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        git clone --depth=1 \
+          --branch=${{ github.event.inputs.KERNEL_BRANCH }} \
+          ${{ github.event.inputs.KERNEL_SOURCE_URL }} \
+          kernel-source
+        echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Verify kernel config
+    - name: Verify Kernel Config
       run: |
         cd $KERNEL_DIR
         echo "Checking for defconfig files..."
-        ls -la arch/arm64/configs/ | grep k69 || echo "No k69 configs found"
-        
-        if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
-          echo "✅ Found k69v1_64_k419_defconfig"
-          echo "DEFCONFIG=k69v1_64_k419_defconfig" >> $GITHUB_ENV
+        if [ -f "arch/arm64/configs/${{ github.event.inputs.DEFCONFIG }}" ]; then
+          echo "✅ Found defconfig: ${{ github.event.inputs.DEFCONFIG }}"
         else
-          echo "❌ k69v1_64_k419_defconfig not found"
+          echo "❌ Defconfig not found: ${{ github.event.inputs.DEFCONFIG }}"
+          echo "Available defconfigs:"
+          ls arch/arm64/configs/ | grep defconfig | head -10
           exit 1
         fi
 
-    - name: Build kernel
+    - name: Setup Build Environment
       run: |
-        cd $KERNEL_DIR
-        echo "Starting kernel build with $DEFCONFIG..."
+        echo "ARCH=$ARCH" >> $GITHUB_ENV
+        echo "SUBARCH=$ARCH" >> $GITHUB_ENV
         
-        # Clean previous builds
-        rm -rf out
+        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
+        echo "LD=$NDK_BIN/ld.lld" >> $GITHUB_ENV
+        echo "AR=$NDK_BIN/llvm-ar" >> $GITHUB_ENV
+        echo "NM=$NDK_BIN/llvm-nm" >> $GITHUB_ENV
         
-        # Configure kernel
-        make O=out ARCH=arm64 $DEFCONFIG
-        
-        # Build kernel with limited jobs to avoid memory issues
-        make O=out ARCH=arm64 -j2 \
-          CC="$CC" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
-          CLANG_TRIPLE="$CLANG_TRIPLE"
+        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE_ARM32=$NDK_BIN/arm-linux-androideabi-" >> $GITHUB_ENV
 
-    - name: Check build results
+    - name: Set Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 8
+
+    - name: Configure Kernel
       run: |
         cd $KERNEL_DIR
-        echo "Build results:"
+        mkdir -p out
+        make O=out ARCH=$ARCH ${{ github.event.inputs.DEFCONFIG }}
+        echo "✅ Kernel configuration completed"
+
+    - name: Build Kernel
+      run: |
+        cd $KERNEL_DIR
+        echo "🚀 Starting kernel build..."
+        
+        make O=out ARCH=$ARCH -j$(($(nproc)/2)) \
+          CC="$CC" \
+          LD="$LD" \
+          AR="$AR" \
+          NM="$NM" \
+          CLANG_TRIPLE="$CLANG_TRIPLE" \
+          CROSS_COMPILE="$CROSS_COMPILE" \
+          CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+          2>&1 | tee build.log
+
+    - name: Check Build Results
+      run: |
+        cd $KERNEL_DIR
+        echo "📦 Build artifacts check:"
+        
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "✅ SUCCESS: Kernel Image.gz found!"
           ls -lh out/arch/arm64/boot/
+          echo "File size: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
         else
-          echo "❌ FAILED: No kernel image produced"
-          echo "Available files in output:"
-          find out/ -type f -name "*" 2>/dev/null | head -20 || true
+          echo "❌ FAILED: Kernel image not produced"
+          echo "Build log tail:"
+          tail -50 build.log || echo "No build log found"
+          echo "Available files in out directory:"
+          find out/ -type f -name "*.o" | head -10 || true
           exit 1
         fi
 
-    - name: Upload artifacts
-      if: success()
+    - name: Upload Kernel Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build
+        name: kernel-${{ github.event.inputs.DEFCONFIG }}-${{ github.run_number }}
         path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
-        retention-days: 7
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtbo.img
+        retention-days: 30
+
+    - name: Upload Build Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/build.log
+        retention-days: 15
