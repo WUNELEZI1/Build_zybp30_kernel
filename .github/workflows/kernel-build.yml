@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Source Fix)
+name: Analyze Build Results
 
 on:
   workflow_dispatch:
@@ -13,32 +13,19 @@ env:
   SUBARCH: arm64
 
 jobs:
-  build:
+  analyze:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 30
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install Python 2.7 and dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y software-properties-common
-        sudo add-apt-repository universe
-        sudo apt-get update
-        sudo apt-get install -y python2.7 python2.7-dev
+        sudo apt-get install -y python2.7 python2.7-dev file tree
         sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
-        python2 --version
-
-    - name: Install kernel build dependencies
-      run: |
-        sudo apt-get install -y \
-          build-essential bc bison flex libssl-dev libelf-dev \
-          git wget unzip ccache python3 \
-          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-          libncurses-dev dwarves curl lz4 lzop \
-          rsync kmod cpio file patch
 
     - name: Clone kernel source
       run: |
@@ -47,126 +34,147 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Fix source code errors
+    - name: Comprehensive build output analysis
       run: |
         cd $KERNEL_DIR
-        echo "=== 修复源码错误 ==="
+        echo "=== 完整的编译输出分析 ==="
         
-        # 修复 extcon-mtk-usb.c 中的变量名错误
-        if [ -f "drivers/misc/mediatek/extcon/extcon-mtk-usb.c" ]; then
-          echo "修复 extcon-mtk-usb.c 中的 tval -> pval"
-          sed -i 's/tval\.intval/pval.intval/g' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          echo "修复完成，验证:"
-          grep -n "pval.intval" drivers/misc/mediatek/extcon/extcon-mtk-usb.c | head -5
+        # 检查整个 out 目录结构
+        echo "1. 完整的 out 目录结构:"
+        find out/ -type f -name "*" 2>/dev/null | head -50
+        
+        echo ""
+        echo "2. 按文件类型分类:"
+        echo "   对象文件 (.o): $(find out/ -name "*.o" 2>/dev/null | wc -l)"
+        echo "   内核模块 (.ko): $(find out/ -name "*.ko" 2>/dev/null | wc -l)"
+        echo "   归档文件 (.a): $(find out/ -name "*.a" 2>/dev/null | wc -l)"
+        echo "   镜像文件: $(find out/ -name "Image*" -o -name "*.img" -o -name "*.gz" 2>/dev/null | wc -l)"
+        
+        echo ""
+        echo "3. 搜索所有可能的内核镜像位置:"
+        # 检查标准位置
+        for path in "arch/arm64/boot" "boot" "usr" "kernel" ""; do
+          if [ -d "out/$path" ]; then
+            echo "   检查 out/$path:"
+            find out/$path -name "Image*" -o -name "vmlinuz*" -o -name "kernel*" -o -name "*.img" 2>/dev/null | head -10
+          fi
+        done
+        
+        echo ""
+        echo "4. 检查所有生成的文件（按大小排序）:"
+        find out/ -type f -exec ls -lh {} \; 2>/dev/null | sort -k5 -hr | head -20
+        
+        echo ""
+        echo "5. 检查 vmlinux 和相关文件:"
+        find out/ -name "vmlinux*" -o -name "System.map" -o -name ".config" 2>/dev/null
+        
+        echo ""
+        echo "6. 检查设备树文件:"
+        find out/ -name "*.dtb" -o -name "*.dtbo" -o -name "dtb.img" -o -name "dtbo.img" 2>/dev/null
+        
+        echo ""
+        echo "7. 详细的 arch/arm64/boot 目录:"
+        ls -la out/arch/arm64/boot/ 2>/dev/null || echo "   out/arch/arm64/boot/ 目录不存在"
+        
+        # 检查是否生成了任何可启动的内核
+        echo ""
+        echo "8. 检查是否生成了可启动内核:"
+        if find out/ -name "vmlinux" 2>/dev/null | grep -q .; then
+          echo "   ✅ 找到了 vmlinux (未压缩的内核)"
+          vmlinux_file=$(find out/ -name "vmlinux" | head -1)
+          echo "   文件: $vmlinux_file"
+          file "$vmlinux_file" 2>/dev/null || echo "   无法分析文件类型"
         else
-          echo "未找到 extcon-mtk-usb.c 文件"
+          echo "   ❌ 没有找到 vmlinux"
+        fi
+
+    - name: Fix linking issues and build final kernel
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 修复链接问题并生成最终内核 ==="
+        
+        # 检查当前的构建状态
+        if [ -f "out/vmlinux" ]; then
+          echo "vmlinux 存在，尝试生成压缩内核..."
+          
+          # 尝试手动生成 Image.gz
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            echo "找到未压缩的 Image，生成 Image.gz..."
+            gzip -k out/arch/arm64/boot/Image
+            ls -lh out/arch/arm64/boot/Image.gz || echo "无法生成 Image.gz"
+          else
+            echo "生成未压缩的 Image..."
+            # 使用 objcopy 从 vmlinux 提取 Image
+            aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image 2>/dev/null && {
+              echo "✅ 成功生成 Image"
+              gzip -k out/arch/arm64/boot/Image
+              echo "✅ 生成 Image.gz"
+              ls -lh out/arch/arm64/boot/Image.gz
+            } || echo "无法生成 Image"
+          fi
+        else
+          echo "没有找到 vmlinux，无法生成内核镜像"
         fi
         
-        # 检查并修复其他常见错误
-        echo "检查其他可能的错误..."
+        # 尝试修复链接问题
+        echo "尝试修复未定义符号..."
         
-        # 修复可能的权限问题
-        find . -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
-
-    - name: Download Android NDK
-      run: |
-        wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
-        unzip -q android-ndk-r23c-linux.zip
-        echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
-
-    - name: Setup build environment
-      run: |
-        echo "ARCH=arm64" >> $GITHUB_ENV
-        echo "SUBARCH=arm64" >> $GITHUB_ENV
-        
-        NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
-        echo "LD=$NDK_BIN/ld.lld" >> $GITHUB_ENV
-        echo "AR=$NDK_BIN/llvm-ar" >> $GITHUB_ENV
-        echo "NM=$NDK_BIN/llvm-nm" >> $GITHUB_ENV
-        echo "STRIP=$NDK_BIN/llvm-strip" >> $GITHUB_ENV
-        echo "OBJCOPY=$NDK_BIN/llvm-objcopy" >> $GITHUB_ENV
-        echo "OBJDUMP=$NDK_BIN/llvm-objdump" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
-        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-
-    - name: Configure kernel
-      run: |
-        cd $KERNEL_DIR
-        mkdir -p out
-        
-        echo "配置内核..."
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }} || {
-          echo "特定配置失败，使用基础配置"
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-        }
-
-    - name: Build kernel with fixes
-      run: |
-        cd $KERNEL_DIR
-        
-        if [ ! -f "out/.config" ]; then
-          echo "❌ 没有配置文件"
-          exit 1
+        # 方法1: 禁用有问题的模块
+        if [ -f "out/.config" ]; then
+          echo "禁用有问题的驱动模块..."
+          # 禁用导致链接错误的驱动
+          ./scripts/config --file out/.config -d ACCDET_MT6358
+          ./scripts/config --file out/.config -d MTK_SENSORS_1_0
+          ./scripts/config --file out/.config -d INPUT_FINGERPRINT
+          make O=out ARCH=arm64 olddefconfig
         fi
-        
-        echo "=== 开始编译内核（已修复源码错误）==="
-        
-        # 设置宽松的编译标志，避免因警告而停止
-        export KCFLAGS="-Wno-error -Wno-unused-variable -Wno-unused-function"
-        
-        time make O=out ARCH=arm64 -j$(($(nproc)/2)) \
-          CC="$CC" \
-          LD="$LD" \
-          AR="$AR" \
-          NM="$NM" \
-          STRIP="$STRIP" \
-          OBJCOPY="$OBJCOPY" \
-          OBJDUMP="$OBJDUMP" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
-          CLANG_TRIPLE="$CLANG_TRIPLE" \
-          KCFLAGS="$KCFLAGS" \
-          2>&1 | tee build.log
 
-    - name: Check build progress
-      if: failure()
+    - name: Final build attempt
       run: |
         cd $KERNEL_DIR
-        echo "=== 编译进度检查 ==="
+        echo "=== 最终构建尝试 ==="
         
-        # 检查编译到了哪个阶段
-        echo "已编译的文件数量:"
-        find out/ -name "*.o" | wc -l || echo "0"
+        # 尝试完成构建
+        make O=out ARCH=arm64 -j1 \
+          CC="aarch64-linux-gnu-gcc" \
+          CROSS_COMPILE="aarch64-linux-gnu-" \
+          2>&1 | tail -20 || echo "构建完成或有错误"
         
-        echo "编译错误统计:"
-        grep -c "error:" build.log || echo "0"
-        
-        echo "最后的错误:"
-        tail -20 build.log
+        # 最终检查
+        echo "=== 最终文件检查 ==="
+        find out/ -name "Image*" -o -name "vmlinux" -o -name "*.gz" -o -name "*.img" 2>/dev/null | while read f; do
+          echo "找到: $f ($(du -h "$f" 2>/dev/null | cut -f1 || echo '未知大小'))"
+        done
 
-    - name: Upload partial build
-      if: failure()
+    - name: Upload all build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: partial-build-${{ github.run_number }}
+        name: complete-build-analysis-${{ github.run_number }}
         path: |
-          ${{ env.KERNEL_DIR }}/build.log
-          ${{ env.KERNEL_DIR }}/out/.config
+          ${{ env.KERNEL_DIR }}/out/
         retention-days: 15
 
-    - name: Upload successful kernel
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-success-${{ github.run_number }}
-        path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
-        retention-days: 30
-
-    - name: Final verification
-      if: success()
+    - name: Create build report
       run: |
         cd $KERNEL_DIR
-        echo "🎉 🎉 🎉 编译成功完成！"
-        echo "生成的内核文件:"
-        ls -lh out/arch/arm64/boot/
-        echo "内核镜像大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
+        echo "=== 构建报告 ===" > build-report.txt
+        echo "构建时间: $(date)" >> build-report.txt
+        echo "Defconfig: ${{ github.event.inputs.DEFCONFIG }}" >> build-report.txt
+        echo "" >> build-report.txt
+        
+        echo "生成的文件:" >> build-report.txt
+        find out/ -type f -name "Image*" -o -name "vmlinux*" -o -name "*.img" -o -name "*.gz" 2>/dev/null >> build-report.txt
+        
+        echo "" >> build-report.txt
+        echo "文件详情:" >> build-report.txt
+        find out/ -type f \( -name "Image*" -o -name "vmlinux*" -o -name "*.img" -o -name "*.gz" \) -exec ls -lh {} \; 2>/dev/null >> build-report.txt
+        
+        cat build-report.txt
+
+    - name: Upload build report
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-report-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/build-report.txt
+        retention-days: 15
