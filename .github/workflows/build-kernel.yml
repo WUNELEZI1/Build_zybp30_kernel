@@ -1,1 +1,199 @@
+name: Build MT6768 Android Kernel
 
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 允许手动触发构建
+    inputs:
+      defconfig:
+        description: 'Defconfig name'
+        required: true
+        default: 'zybp30_defconfig'
+
+env:
+  KERNEL_SOURCE_URL: "https://github.com/NullableIsBellable/Gale-Kernel-Source.git"
+  KERNEL_BRANCH: "mt6768-4.19"
+  NDK_VERSION: "r23c"
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          bc \
+          bison \
+          flex \
+          libssl-dev \
+          python2 \
+          python3 \
+          git \
+          zip \
+          make \
+          gcc-aarch64-linux-gnu \
+          libelf-dev \
+          libncurses-dev \
+          dwarves \
+          curl \
+          wget
+        
+    - name: Clone kernel source
+      run: |
+        git clone --depth=1 --branch=$KERNEL_BRANCH $KERNEL_SOURCE_URL kernel-source
+        echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
+        
+    - name: Download and setup Android NDK
+      run: |
+        wget -q https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-linux.zip
+        unzip -q android-ndk-$NDK_VERSION-linux.zip
+        echo "NDK_PATH=$(pwd)/android-ndk-$NDK_VERSION" >> $GITHUB_ENV
+        
+    - name: Setup build environment
+      run: |
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "SUBARCH=arm64" >> $GITHUB_ENV
+        
+        # Clang工具链
+        echo "CC=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" >> $GITHUB_ENV
+        echo "LD=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld" >> $GITHUB_ENV
+        echo "AR=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
+        echo "NM=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" >> $GITHUB_ENV
+        echo "STRIP=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" >> $GITHUB_ENV
+        echo "OBJCOPY=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy" >> $GITHUB_ENV
+        echo "OBJDUMP=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump" >> $GITHUB_ENV
+        
+        # 交叉编译工具
+        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE_ARM32=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/arm-linux-androideabi-" >> $GITHUB_ENV
+        
+    - name: List available defconfigs
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 可用的defconfig文件 ==="
+        ls -la arch/arm64/configs/ | grep -E ".*defconfig" || echo "未找到defconfig文件"
+        
+    - name: Configure kernel
+      run: |
+        cd $KERNEL_DIR
+        
+        # 创建输出目录
+        mkdir -p out
+        
+        # 尝试不同的defconfig名称
+        DEFCONFIG_NAMES="zybp30_defconfig gale_defconfig mt6768_defconfig user_defconfig"
+        
+        for config in $DEFCONFIG_NAMES; do
+          if [ -f "arch/arm64/configs/$config" ]; then
+            echo "使用defconfig: $config"
+            echo "DEFCONFIG=$config" >> $GITHUB_ENV
+            break
+          fi
+        done
+        
+        if [ -z "$DEFCONFIG" ]; then
+          # 如果没有找到预定义的defconfig，使用第一个找到的
+          FIRST_CONFIG=$(ls arch/arm64/configs/ | grep defconfig | head -1)
+          if [ -n "$FIRST_CONFIG" ]; then
+            echo "使用第一个defconfig: $FIRST_CONFIG"
+            echo "DEFCONFIG=$FIRST_CONFIG" >> $GITHUB_ENV
+          else
+            echo "错误: 未找到任何defconfig文件"
+            exit 1
+          fi
+        fi
+        
+        # 应用defconfig
+        make O=out ARCH=arm64 $DEFCONFIG
+        
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+        echo "开始编译内核..."
+        
+        # 编译内核
+        make O=out ARCH=arm64 -j$(nproc) \
+          CC="$CC" \
+          LD="$LD" \
+          AR="$AR" \
+          NM="$NM" \
+          STRIP="$STRIP" \
+          OBJCOPY="$OBJCOPY" \
+          OBJDUMP="$OBJDUMP" \
+          CLANG_TRIPLE="$CLANG_TRIPLE" \
+          CROSS_COMPILE="$CROSS_COMPILE" \
+          CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+          
+    - name: Check build artifacts
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 编译产物 ==="
+        find out/arch/arm64/boot/ -type f 2>/dev/null | while read file; do
+          if [ -f "$file" ]; then
+            echo "找到: $file ($(du -h "$file" | cut -f1))"
+          fi
+        done || echo "未找到标准输出文件"
+        
+        # 检查重要文件是否存在
+        IMPORTANT_FILES="Image.gz Image.gz-dtb dtbo.img dtb.img"
+        for file in $IMPORTANT_FILES; do
+          if [ -f "out/arch/arm64/boot/$file" ]; then
+            echo "✓ $file 编译成功"
+          else
+            echo "✗ $file 未找到"
+          fi
+        done
+        
+    - name: Create release package
+      run: |
+        cd $KERNEL_DIR
+        mkdir -p kernel-release
+        
+        # 复制内核镜像
+        cp out/arch/arm64/boot/Image.gz kernel-release/ 2>/dev/null || true
+        cp out/arch/arm64/boot/Image.gz-dtb kernel-release/ 2>/dev/null || true
+        cp out/arch/arm64/boot/dtbo.img kernel-release/ 2>/dev/null || true
+        cp out/arch/arm64/boot/dtb.img kernel-release/ 2>/dev/null || true
+        
+        # 复制模块（如果有）
+        find out -name "*.ko" -exec cp {} kernel-release/ \; 2>/dev/null || true
+        
+        # 创建编译信息文件
+        echo "内核编译信息" > kernel-release/build-info.txt
+        echo "============" >> kernel-release/build-info.txt
+        echo "设备: MT6768" >> kernel-release/build-info.txt
+        echo "Android版本: 12" >> kernel-release/build-info.txt
+        echo "内核版本: 4.19.191" >> kernel-release/build-info.txt
+        echo "Defconfig: $DEFCONFIG" >> kernel-release/build-info.txt
+        echo "编译时间: $(date)" >> kernel-release/build-info.txt
+        echo "Git Commit: $GITHUB_SHA" >> kernel-release/build-info.txt
+        
+        # 打包
+        zip -r kernel-release-$(date +%Y%m%d-%H%M%S).zip kernel-release/
+        echo "RELEASE_FILE=kernel-release-$(date +%Y%m%d-%H%M%S).zip" >> $GITHUB_ENV
+        
+    - name: Upload kernel artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build-${{ github.sha }}
+        path: |
+          ${{ env.KERNEL_DIR }}/kernel-release/
+          ${{ env.KERNEL_DIR }}/${{ env.RELEASE_FILE }}
+        retention-days: 30
+        
+    - name: Create GitHub Release
+      if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ${{ env.KERNEL_DIR }}/${{ env.RELEASE_FILE }}
+        generate_release_notes: true
