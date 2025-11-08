@@ -1,6 +1,8 @@
-name: Build MT6768 Kernel (Fix Compile Error)
+name: Build MT6768 Kernel
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       DEFCONFIG:
@@ -38,7 +40,7 @@ jobs:
           git wget unzip ccache python3 \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           libncurses-dev dwarves curl lz4 lzop \
-          rsync kmod cpio file patch
+          rsync kmod cpio file
 
     - name: Clone kernel source
       run: |
@@ -53,50 +55,10 @@ jobs:
         unzip -q android-ndk-r23c-linux.zip
         echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
 
-    - name: Fix compilation errors
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 修复编译错误 ==="
-        
-        # 检查具体的错误位置
-        echo "检查 huge_memory.c 文件..."
-        if [ -f "mm/huge_memory.c" ]; then
-          echo "查看错误位置附近的代码:"
-          sed -n '2435,2445p' mm/huge_memory.c
-        fi
-        
-        # 应用补丁修复函数参数错误
-        echo "尝试自动修复..."
-        
-        # 方法1: 注释掉有问题的代码行
-        sed -i '2440s/^/\/\//' mm/huge_memory.c 2>/dev/null && echo "已注释问题行" || echo "无法修改文件"
-        
-        # 方法2: 尝试使用更宽松的编译选项
-        echo "应用宽松编译选项..."
-        
-        # 创建编译补丁
-        cat > .github/compile_fix.patch << 'EOF'
---- a/mm/huge_memory.c
-+++ b/mm/huge_memory.c
-@@ -2437,7 +2437,7 @@
-        }
- 
-        /* Fallthrough */
--       huge_memory.c:2440:30: error: too few arguments to function call, expected 3, have 2
-+       // huge_memory.c:2440:30: error: too few arguments to function call, expected 3, have 2
-        transparent_hugepage_flags = __transparent_hugepage_flags();
- 
-        /*
-EOF
-        
-        # 尝试应用补丁
-        patch -p1 < .github/compile_fix.patch 2>/dev/null && echo "补丁应用成功" || echo "补丁应用失败，继续其他方法"
-
     - name: Setup build environment
       run: |
         echo "ARCH=arm64" >> $GITHUB_ENV
         echo "SUBARCH=arm64" >> $GITHUB_ENV
-        
         NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
         echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
         echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android" >> $GITHUB_ENV
@@ -106,98 +68,49 @@ EOF
       run: |
         cd $KERNEL_DIR
         mkdir -p out
-        
-        # 使用系统 GCC 进行配置
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $DEFCONFIG || {
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }} || {
           echo "配置失败，使用基础配置"
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
         }
 
-    - name: Build with workarounds
+    - name: Build kernel
       run: |
         cd $KERNEL_DIR
-        
         if [ ! -f "out/.config" ]; then
           echo "❌ 没有配置文件"
           exit 1
         fi
-        
-        echo "=== 使用变通方案编译 ==="
-        
-        # 设置宽松的编译标志
-        export KCFLAGS="-Wno-error -Wno-unused-parameter -Wno-missing-field-initializers"
-        
-        # 尝试编译
+        echo "开始编译内核..."
         time make O=out ARCH=arm64 -j2 \
           CC="$CC" \
           CROSS_COMPILE="$CROSS_COMPILE" \
           CLANG_TRIPLE="$CLANG_TRIPLE" \
-          KCFLAGS="$KCFLAGS" \
           2>&1 | tee build.log
 
-    - name: Check results and try alternative
-      if: failure()
+    - name: Check build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 第一次编译失败，尝试替代方案 ==="
-        
-        # 检查错误类型
-        grep -i "error\|warning" build.log | head -20
-        
-        # 尝试使用 GCC 而不是 Clang
-        echo "尝试使用 GCC 工具链..."
-        make O=out ARCH=arm64 -j2 \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          2>&1 | tee build_gcc.log
-
-    - name: Final build check
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 最终构建检查 ==="
-        
-        # 检查任何构建日志
-        if [ -f "build.log" ]; then
-          echo "Clang 构建日志: $(wc -l < build.log) 行"
-        fi
-        if [ -f "build_gcc.log" ]; then
-          echo "GCC 构建日志: $(wc -l < build_gcc.log) 行"
-        fi
-        
-        # 检查内核镜像
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "🎉 ✅ 编译成功!"
           ls -lh out/arch/arm64/boot/
         else
           echo "❌ 编译失败"
-          echo "输出目录内容:"
-          find out/ -type f -name "*" 2>/dev/null | head -20
-          
-          # 显示关键错误
-          echo "=== 关键错误信息 ==="
-          for log in build.log build_gcc.log; do
-            if [ -f "$log" ]; then
-              echo "在 $log 中:"
-              grep -i "error:" "$log" | head -10
-            fi
-          done
+          tail -50 build.log
+          exit 1
         fi
 
-    - name: Upload any artifacts
+    - name: Upload artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-final-${{ github.run_number }}
-        path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
+        name: kernel-build-${{ github.run_number }}
+        path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
         retention-days: 30
 
     - name: Upload debug info
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-debug-final-${{ github.run_number }}
-        path: |
-          ${{ env.KERNEL_DIR }}/build.log
-          ${{ env.KERNEL_DIR }}/build_gcc.log
-          ${{ env.KERNEL_DIR }}/out/.config
+        name: build-debug-${{ github.run_number }}
+        path: ${{ env.KERNEL_DIR }}/build.log
         retention-days: 15
