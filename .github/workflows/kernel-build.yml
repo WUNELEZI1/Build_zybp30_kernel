@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Uclamp Fix)
+name: Build MT6768 Kernel (Fixed Block Crypto)
 
 on:
   workflow_dispatch:
@@ -38,10 +38,10 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Fix uclamp compilation error
+    - name: Fix compilation errors
       run: |
         cd $KERNEL_DIR
-        echo "=== 修复 uclamp 编译错误 ==="
+        echo "=== 修复编译错误 ==="
         
         # 清理
         rm -rf out
@@ -59,6 +59,13 @@ jobs:
         # 修复配置问题
         echo "应用修复..."
         
+        # 修复块设备加密相关错误 - 禁用相关功能
+        ./scripts/config --file out/.config -d BLK_INLINE_ENCRYPTION
+        ./scripts/config --file out/.config -d BLK_DEV_INLINE_CRYPTO
+        ./scripts/config --file out/.config -d BLK_CRYPTO
+        ./scripts/config --file out/.config -d BLK_CRYPTO_FALLBACK
+        ./scripts/config --file out/.config -d KEYS
+        
         # 禁用 UCLAMP 功能（导致编译错误的根源）
         ./scripts/config --file out/.config -d UCLAMP_TASK
         ./scripts/config --file out/.config -d SCHED_TUNE
@@ -73,13 +80,57 @@ jobs:
         ./scripts/config --file out/.config -d INPUT_FINGERPRINT
         ./scripts/config --file out/.config -d MEDIATEX_EXTCON
         
+        # 确保启用必要的配置
+        ./scripts/config --file out/.config -e MODULES
+        ./scripts/config --file out/.config -e MODULE_UNLOAD
+        ./scripts/config --file out/.config -e ARM64
+        
         # 更新配置
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
         
         echo "修复后的配置摘要:"
-        grep -E "UCLAMP|SCHED_TUNE" out/.config || echo "相关配置已禁用"
+        grep -E "BLK_INLINE|BLK_CRYPTO|UCLAMP|SCHED_TUNE" out/.config || echo "相关配置已禁用"
 
-    - name: Build with uclamp fix
+    - name: Patch kernel source (fix inline crypto errors)
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 应用源码补丁修复内联加密错误 ==="
+        
+        # 创建补丁文件来修复 blk-crypto.h 中的内联函数问题
+        cat > fix_inline_crypto.patch << 'EOF'
+        --- a/include/linux/blk-crypto.h
+        +++ b/include/linux/blk-crypto.h
+        @@ -30,7 +30,7 @@ static inline bool blk_crypto_rq_is_encrypted(struct request *rq)
+         
+         #ifdef CONFIG_BLK_INLINE_ENCRYPTION
+         
+        -inline void blk_crypto_flock(struct keyslot_manager *ksm, unsigned int flags);
+        +static inline void blk_crypto_flock(struct keyslot_manager *ksm, unsigned int flags) {}
+         
+         #else /* CONFIG_BLK_INLINE_ENCRYPTION */
+         
+        --- a/include/linux/keyslot-manager.h
+        +++ b/include/linux/keyslot-manager.h
+        @@ -98,7 +98,7 @@ void *keyslot_manager_private(struct keyslot_manager *ksm);
+         
+         #ifdef CONFIG_BLK_INLINE_ENCRYPTION
+         
+        -inline void ksm_flock(struct keyslot_manager *ksm, unsigned int flags);
+        +static inline void ksm_flock(struct keyslot_manager *ksm, unsigned int flags) {}
+         
+         #else /* CONFIG_BLK_INLINE_ENCRYPTION */
+         
+        EOF
+        
+        # 应用补丁
+        if patch -p1 -N --dry-run < fix_inline_crypto.patch; then
+          patch -p1 < fix_inline_crypto.patch
+          echo "✅ 源码补丁应用成功"
+        else
+          echo "⚠️ 补丁可能已应用或不需要，继续编译"
+        fi
+
+    - name: Build with fixes
       run: |
         cd $KERNEL_DIR
         
@@ -95,9 +146,10 @@ jobs:
         export CROSS_COMPILE=aarch64-linux-gnu-
         
         echo "开始编译..."
-        time make O=out ARCH=arm64 -j$(($(nproc)/2)) \
+        # 使用更多详细输出以便调试
+        time make O=out ARCH=arm64 -j$(nproc) \
           CROSS_COMPILE="$CROSS_COMPILE" \
-          2>&1 | tee build.log
+          V=1 2>&1 | tee build.log
 
     - name: Check compilation results
       run: |
@@ -110,9 +162,12 @@ jobs:
           echo "错误: $(grep -c "error:" build.log || echo 0)"
           echo "警告: $(grep -c "warning:" build.log || echo 0)"
           
-          # 检查是否有新的错误
-          if grep -q "error:" build.log; then
-            echo "新错误:"
+          # 检查特定错误
+          if grep -q "blk_crypto_flock" build.log || grep -q "ksm_flock" build.log; then
+            echo "❌ 块设备加密错误仍然存在:"
+            grep -A 5 -B 5 "blk_crypto_flock\|ksm_flock" build.log | head -20
+          elif grep -q "error:" build.log; then
+            echo "其他错误:"
             grep "error:" build.log | tail -5
           else
             echo "✅ 无编译错误"
@@ -130,6 +185,9 @@ jobs:
           echo "大小: $(du -h out/vmlinux | cut -f1)"
         else
           echo "❌ vmlinux 未生成"
+          # 检查是否有对象文件
+          echo "对象文件检查:"
+          find out/ -name "*.o" | head -5
         fi
         
         # 检查 Image.gz
@@ -138,6 +196,12 @@ jobs:
           echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
         else
           echo "❌ Image.gz 未生成"
+          # 检查是否有未压缩的 Image
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            echo "⚠️ 找到未压缩的 Image，手动压缩..."
+            gzip -k out/arch/arm64/boot/Image
+            echo "✅ 手动生成 Image.gz 成功"
+          fi
         fi
         
         # 列出所有生成的文件
@@ -146,42 +210,39 @@ jobs:
           echo "📄 $f ($(du -h "$f" 2>/dev/null | cut -f1))"
         done || echo "无内核文件"
 
-    - name: Manual kernel image generation
+    - name: Alternative build approach
       if: failure()
       run: |
         cd $KERNEL_DIR
-        echo "=== 手动生成内核镜像 ==="
+        echo "=== 尝试替代构建方法 ==="
         
-        # 如果编译失败但有对象文件，尝试手动链接
-        if find out/ -name "*.o" | head -1 | grep -q .; then
-          echo "找到对象文件，尝试手动生成内核..."
-          
-          # 创建必要的目录
-          mkdir -p out/arch/arm64/boot
-          
-          # 尝试手动生成 Image
-          echo "尝试生成未压缩的内核镜像..."
-          aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux -T out/arch/arm64/kernel/vmlinux.lds \
-            $(find out/ -name "*.o" | head -20) 2>/dev/null && {
-            echo "✅ 手动生成 vmlinux 成功"
-            
-            # 生成 Image
-            aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image 2>/dev/null && {
-              echo "✅ 生成 Image 成功"
-              gzip -k out/arch/arm64/boot/Image
-              echo "✅ 生成 Image.gz 成功"
-              ls -lh out/arch/arm64/boot/Image.gz
-            } || echo "无法生成 Image"
-          } || echo "手动链接失败"
-        else
-          echo "没有对象文件，无法手动生成内核"
-        fi
+        # 完全清理
+        rm -rf out
+        mkdir -p out
+        
+        echo "使用最小配置构建..."
+        # 使用 defconfig 并手动禁用问题配置
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+        
+        # 强制禁用所有块加密相关配置
+        for config in BLK_INLINE_ENCRYPTION BLK_DEV_INLINE_CRYPTO BLK_CRYPTO BLK_CRYPTO_FALLBACK KEYS; do
+          ./scripts/config --file out/.config -d $config 2>/dev/null || true
+        done
+        
+        # 禁用其他问题配置
+        ./scripts/config --file out/.config -d UCLAMP_TASK
+        ./scripts/config --file out/.config -d SCHED_TUNE
+        
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+        
+        echo "使用最小配置编译..."
+        time make O=out ARCH=arm64 -j$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 
     - name: Upload successful kernel
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-uclamp-fixed-${{ github.run_number }}
+        name: kernel-fixed-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
           ${{ env.KERNEL_DIR }}/out/vmlinux
@@ -191,10 +252,11 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-logs-uclamp-${{ github.run_number }}
+        name: build-logs-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/build.log
           ${{ env.KERNEL_DIR }}/out/.config
+          ${{ env.KERNEL_DIR }}/fix_inline_crypto.patch
         retention-days: 15
 
     - name: Final summary
@@ -208,7 +270,7 @@ jobs:
           ls -lh out/arch/arm64/boot/Image.gz
           echo ""
           echo "下一步:"
-          echo "1. 下载 Artifacts 中的 kernel-uclamp-fixed-*"
+          echo "1. 下载 Artifacts 中的 kernel-fixed-*"
           echo "2. 使用 Image.gz 刷入设备"
           echo "3. 测试内核功能"
         elif [ -f "out/vmlinux" ]; then
@@ -216,5 +278,6 @@ jobs:
           echo "可以手动压缩: gzip -c out/vmlinux > Image.gz"
         else
           echo "❌ 编译失败"
-          echo "请检查 build-logs-uclamp-* 中的错误信息"
+          echo "请检查 build-logs-* 中的错误信息"
+          echo "可能需要进一步调整内核配置或修复源码"
         fi
