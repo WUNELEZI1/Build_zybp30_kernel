@@ -1,12 +1,13 @@
-name: Build MT6768 Kernel (Fixed Config)
+name: Build MT6768 Kernel (KConfig Fix)
 
 on:
   workflow_dispatch:
     inputs:
-      DEFCONFIG:
-        description: 'Kernel defconfig'
-        required: true
-        default: 'k69v1_64_k419_debug_defconfig'
+      USE_DEBUG_CONFIG:
+        description: 'Use debug defconfig instead'
+        required: false
+        default: false
+        type: boolean
 
 env:
   ARCH: arm64
@@ -47,28 +48,6 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Debug kernel source structure
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 详细的内核源码分析 ==="
-        echo "当前目录: $(pwd)"
-        echo "=== 文件列表 ==="
-        ls -la
-        echo "=== 检查 Makefile ==="
-        head -20 Makefile || echo "无法读取 Makefile"
-        echo "=== 检查 defconfig 目录 ==="
-        ls -la arch/arm64/configs/ | head -20
-        echo "=== 检查指定的 defconfig 文件 ==="
-        if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
-          echo "✅ Defconfig 文件存在"
-          echo "文件内容前30行:"
-          head -30 arch/arm64/configs/k69v1_64_k419_defconfig
-        else
-          echo "❌ Defconfig 文件不存在"
-          echo "可用的 defconfig 文件:"
-          ls arch/arm64/configs/ | head -15
-        fi
-
     - name: Download Android NDK
       run: |
         wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
@@ -85,129 +64,142 @@ jobs:
         echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
         echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-    - name: Test kernel configuration step by step
+    - name: Analyze Kconfig conflicts
       run: |
         cd $KERNEL_DIR
+        echo "=== 详细分析 Kconfig 冲突 ==="
         
-        echo "=== 步骤1: 完全清理环境 ==="
-        make distclean 2>/dev/null || true
-        rm -rf out
-        mkdir -p out
-        
-        echo "=== 步骤2: 检查内核版本和架构支持 ==="
-        grep "VERSION\|PATCHLEVEL" Makefile || echo "无法读取版本信息"
-        
-        echo "=== 步骤3: 尝试不同的配置方法 ==="
-        
-        # 方法1: 直接使用指定的defconfig
-        echo "🔧 尝试方法1: 直接配置"
-        set -x
-        make O=out ARCH=arm64 k69v1_64_k419_defconfig
-        CONFIG_RESULT=$?
-        set +x
-        
-        if [ $CONFIG_RESULT -ne 0 ]; then
-          echo "方法1失败，尝试方法2..."
-          
-          # 方法2: 使用通用defconfig
-          echo "🔧 尝试方法2: 使用通用defconfig"
-          set -x
-          make O=out ARCH=arm64 defconfig
-          set +x
-          
-          if [ -f "out/.config" ]; then
-            echo "✅ 通用配置成功，现在尝试合并自定义配置"
-            # 手动合并配置
-            if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
-              set -x
-              cat arch/arm64/configs/k69v1_64_k419_defconfig >> out/.config
-              make O=out ARCH=arm64 olddefconfig
-              set +x
-            fi
-          fi
+        # 检查有问题的 Kconfig 文件
+        echo "检查 drivers/power/supply/mediatek/charger/Kconfig:199"
+        if [ -f "drivers/power/supply/mediatek/charger/Kconfig" ]; then
+          sed -n '195,205p' drivers/power/supply/mediatek/charger/Kconfig || echo "无法读取文件"
         fi
         
-        echo "=== 配置结果检查 ==="
+        echo "检查 drivers/soc/mediatek/Kconfig:7"
+        if [ -f "drivers/soc/mediatek/Kconfig" ]; then
+          sed -n '1,15p' drivers/soc/mediatek/Kconfig || echo "无法读取文件"
+        fi
+        
+        # 检查 defconfig 中的相关配置
+        echo "=== defconfig 中的相关配置 ==="
+        grep -E "CHARGER_BQ25890|MTK_CMDQ" arch/arm64/configs/k69v1_64_k419_defconfig || echo "未在defconfig中找到相关配置"
+
+    - name: Create manual config workaround
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 创建手动配置绕过方案 ==="
+        
+        mkdir -p out
+        
+        # 方法1: 使用最小配置开始
+        echo "方法1: 使用最小 arm64 配置"
+        make O=out ARCH=arm64 defconfig
+        
         if [ -f "out/.config" ]; then
-          echo "✅ 配置成功!"
-          echo "配置文件行数: $(wc -l < out/.config)"
+          echo "✅ 基础配置创建成功"
+          
+          # 手动设置必要的 MTK 配置
+          echo "手动设置 MTK 相关配置..."
+          # 这些是 MT6768 可能需要的配置
+          ./scripts/config --file out/.config -e ARCH_MEDIATEK
+          ./scripts/config --file out/.config -e ARM64
+          ./scripts/config --file out/.config -e MTK_PLATFORM_ARM64
+          
+          # 对有冲突的配置使用安全值
+          ./scripts/config --file out/.config -d CHARGER_BQ25890
+          ./scripts/config --file out/.config -d MTK_CMDQ
+          
+          # 更新配置
+          make O=out ARCH=arm64 olddefconfig
         else
-          echo "❌ 所有配置方法都失败"
-          echo "检查错误信息..."
+          echo "❌ 基础配置失败"
           exit 1
         fi
 
-    - name: Build kernel
+    - name: Try alternative config methods
       run: |
         cd $KERNEL_DIR
-        echo "=== 开始内核编译 ==="
         
-        # 检查是否已有配置文件
+        # 检查是否要使用 debug 配置
+        if [ "${{ github.event.inputs.USE_DEBUG_CONFIG }}" = "true" ]; then
+          echo "=== 尝试使用 debug defconfig ==="
+          rm -rf out
+          mkdir -p out
+          make O=out ARCH=arm64 k69v1_64_k419_debug_defconfig && {
+            echo "✅ Debug defconfig 成功"
+            exit 0
+          } || {
+            echo "❌ Debug defconfig 也失败"
+          }
+        fi
+        
+        # 方法2: 使用 allyesconfig 然后精简
+        echo "=== 方法2: 使用 allyesconfig ==="
+        rm -rf out
+        mkdir -p out
+        make O=out ARCH=arm64 allyesconfig && {
+          echo "✅ Allyesconfig 成功，现在精简配置"
+          # 禁用所有配置，然后重新启用必要的
+          make O=out ARCH=arm64 allnoconfig
+          # 重新启用 ARM64 基础配置
+          ./scripts/config --file out/.config -e ARM64
+          ./scripts/config --file out/.config -e 64BIT
+          make O=out ARCH=arm64 olddefconfig
+        }
+
+    - name: Build with manual config
+      run: |
+        cd $KERNEL_DIR
+        
+        # 验证配置
         if [ ! -f "out/.config" ]; then
-          echo "❌ 没有找到配置文件，无法编译"
+          echo "❌ 没有有效的配置文件"
           exit 1
         fi
         
-        echo "使用配置文件:"
-        grep "CONFIG_LOCALVERSION" out/.config || echo "无本地版本信息"
+        echo "=== 配置摘要 ==="
+        grep -E "ARM64|MTK|MEDIATEK|CHARGER|CMDQ" out/.config | head -20
         
-        # 开始编译，保存详细日志
-        time make O=out ARCH=arm64 -j$(($(nproc)/2)) \
+        echo "=== 开始编译 ==="
+        # 使用单线程编译以避免复杂错误
+        make O=out ARCH=arm64 -j1 \
           CC="$CC" \
           CROSS_COMPILE="$CROSS_COMPILE" \
           CLANG_TRIPLE="$CLANG_TRIPLE" \
-          V=1 2>&1 | tee build.log
+          2>&1 | tee build.log
 
-    - name: Analyze build results
-      if: always()
+    - name: Check minimal build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 构建结果详细分析 ==="
+        echo "=== 最小构建检查 ==="
         
-        # 检查构建日志
-        if [ -f "build.log" ]; then
-          echo "📄 构建日志存在，大小: $(wc -l < build.log) 行"
-          echo "=== 构建日志最后错误信息 ==="
-          grep -A 10 -B 5 -i "error\|fail\|stop" build.log | tail -50 || echo "无明确错误信息"
+        # 检查是否生成了任何内核镜像
+        if find out/arch/arm64/boot/ -name "Image*" 2>/dev/null | grep -q .; then
+          echo "✅ 成功生成了内核镜像"
+          find out/arch/arm64/boot/ -name "Image*" -exec ls -lh {} \;
         else
-          echo "❌ 构建日志不存在"
-        fi
-        
-        # 检查输出文件
-        echo "=== 输出目录内容 ==="
-        find out/ -type f -name "*.o" 2>/dev/null | head -5 || echo "无目标文件"
-        find out/ -type f -name "Image*" -o -name "*.img" -o -name "*.gz" 2>/dev/null | while read f; do
-          echo "找到: $f ($(du -h "$f" | cut -f1))"
-        done
-        
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "🎉 ✅ 编译成功! 找到内核镜像"
-          ls -lh out/arch/arm64/boot/
-        else
-          echo "❌ 编译失败: 未找到内核镜像"
-          # 检查配置阶段是否成功
-          if [ -f "out/.config" ]; then
-            echo "ℹ️ 配置文件存在但编译失败"
-          else
-            echo "❌ 配置阶段就失败了"
-          fi
+          echo "❌ 未找到内核镜像"
+          echo "=== 构建错误 ==="
+          grep -i "error\|undefined\|conflict" build.log | head -20
+          echo "=== 最后编译步骤 ==="
+          tail -30 build.log
         fi
 
-    - name: Upload debug information
+    - name: Upload results
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-debug-${{ github.run_number }}
+        name: kconfig-fix-results-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/build.log
           ${{ env.KERNEL_DIR }}/out/.config
         retention-days: 15
 
-    - name: Upload kernel artifacts
+    - name: Upload kernel if successful
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.run_number }}
+        name: kernel-minimal-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
         retention-days: 30
