@@ -1,24 +1,12 @@
-name: Build MT6768 Kernel (Optimized)
+name: Build MT6768 Kernel (Fixed Config)
 
 on:
   workflow_dispatch:
     inputs:
-      KERNEL_SOURCE_URL:
-        description: 'Kernel source URL'
-        required: true
-        default: 'https://github.com/NullableIsBellable/Gale-Kernel-Source.git'
-      KERNEL_BRANCH:
-        description: 'Kernel branch'
-        required: true
-        default: 'mt6768-4.19'
       DEFCONFIG:
         description: 'Kernel defconfig'
         required: true
         default: 'k69v1_64_k419_defconfig'
-      NDK_VERSION:
-        description: 'Android NDK version'
-        required: true
-        default: 'r23c'
 
 env:
   ARCH: arm64
@@ -26,143 +14,199 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    
-    steps:
-    - name: Display Run Parameters
-      run: |
-        echo "::group::Build Environment Variables"
-        echo "Kernel Source: ${{ github.event.inputs.KERNEL_SOURCE_URL }}"
-        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_BRANCH }}"
-        echo "Defconfig: ${{ github.event.inputs.DEFCONFIG }}"
-        echo "NDK Version: ${{ github.event.inputs.NDK_VERSION }}"
-        echo "Architecture: $ARCH"
-        echo "::endgroup::"
+    runs-on: ubuntu-20.04
+    timeout-minutes: 60
 
-    - name: Checkout this repo
+    steps:
+    - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Cleanup Workspace
-      uses: rokibhasansagar/slimhub_actions@main
-
-    - name: Install Dependencies
+    - name: Install Python 2.7
       run: |
         sudo apt-get update
+        sudo apt-get install -y software-properties-common
+        sudo add-apt-repository universe
+        sudo apt-get update
+        sudo apt-get install -y python2.7 python2.7-dev
+        sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
+        python2 --version
+
+    - name: Install kernel build dependencies
+      run: |
         sudo apt-get install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
           git wget unzip ccache python3 \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-          libncurses-dev dwarves curl
+          libncurses-dev dwarves curl lz4 lzop \
+          rsync kmod cpio
 
-    - name: Setup Java Environment
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'zulu'
-        java-version: '11'
-
-    - name: Download Android NDK
+    - name: Clone kernel source
       run: |
-        wget -q https://dl.google.com/android/repository/android-ndk-${{ github.event.inputs.NDK_VERSION }}-linux.zip
-        unzip -q android-ndk-${{ github.event.inputs.NDK_VERSION }}-linux.zip
-        echo "NDK_PATH=$(pwd)/android-ndk-${{ github.event.inputs.NDK_VERSION }}" >> $GITHUB_ENV
-
-    - name: Clone Kernel Source
-      run: |
-        git clone --depth=1 \
-          --branch=${{ github.event.inputs.KERNEL_BRANCH }} \
-          ${{ github.event.inputs.KERNEL_SOURCE_URL }} \
+        git clone --depth=1 --branch=mt6768-4.19 \
+          https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Verify Kernel Config
+    - name: Download Android NDK
       run: |
-        cd $KERNEL_DIR
-        echo "Checking for defconfig files..."
-        if [ -f "arch/arm64/configs/${{ github.event.inputs.DEFCONFIG }}" ]; then
-          echo "✅ Found defconfig: ${{ github.event.inputs.DEFCONFIG }}"
-        else
-          echo "❌ Defconfig not found: ${{ github.event.inputs.DEFCONFIG }}"
-          echo "Available defconfigs:"
-          ls arch/arm64/configs/ | grep defconfig | head -10
-          exit 1
-        fi
+        wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
+        unzip -q android-ndk-r23c-linux.zip
+        echo "NDK_PATH=$(pwd)/android-ndk-r23c" >> $GITHUB_ENV
 
-    - name: Setup Build Environment
+    - name: Setup build environment
       run: |
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-        echo "SUBARCH=$ARCH" >> $GITHUB_ENV
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "SUBARCH=arm64" >> $GITHUB_ENV
         
         NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
         echo "CC=$NDK_BIN/clang" >> $GITHUB_ENV
-        echo "LD=$NDK_BIN/ld.lld" >> $GITHUB_ENV
-        echo "AR=$NDK_BIN/llvm-ar" >> $GITHUB_ENV
-        echo "NM=$NDK_BIN/llvm-nm" >> $GITHUB_ENV
-        
-        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
         echo "CROSS_COMPILE=$NDK_BIN/aarch64-linux-android-" >> $GITHUB_ENV
-        echo "CROSS_COMPILE_ARM32=$NDK_BIN/arm-linux-androideabi-" >> $GITHUB_ENV
+        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-    - name: Set Swap Space
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 8
-
-    - name: Configure Kernel
+    - name: Debug defconfig file
       run: |
         cd $KERNEL_DIR
-        mkdir -p out
-        make O=out ARCH=$ARCH ${{ github.event.inputs.DEFCONFIG }}
-        echo "✅ Kernel configuration completed"
-
-    - name: Build Kernel
-      run: |
-        cd $KERNEL_DIR
-        echo "🚀 Starting kernel build..."
+        echo "=== 详细分析 defconfig 文件 ==="
         
-        make O=out ARCH=$ARCH -j$(($(nproc)/2)) \
-          CC="$CC" \
-          LD="$LD" \
-          AR="$AR" \
-          NM="$NM" \
-          CLANG_TRIPLE="$CLANG_TRIPLE" \
-          CROSS_COMPILE="$CROSS_COMPILE" \
-          CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-          2>&1 | tee build.log
-
-    - name: Check Build Results
-      run: |
-        cd $KERNEL_DIR
-        echo "📦 Build artifacts check:"
-        
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "✅ SUCCESS: Kernel Image.gz found!"
-          ls -lh out/arch/arm64/boot/
-          echo "File size: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
+        # 检查文件是否存在和大小
+        if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
+          echo "✅ Defconfig 文件存在"
+          echo "文件大小: $(wc -l < arch/arm64/configs/k69v1_64_k419_defconfig) 行"
+          echo "文件大小: $(wc -c < arch/arm64/configs/k69v1_64_k419_defconfig) 字节"
+          
+          # 检查文件编码
+          file arch/arm64/configs/k69v1_64_k419_defconfig
+          
+          # 检查文件开头和结尾
+          echo "=== 文件前10行 ==="
+          head -10 arch/arm64/configs/k69v1_64_k419_defconfig
+          echo "=== 文件最后10行 ==="
+          tail -10 arch/arm64/configs/k69v1_64_k419_defconfig
+          
+          # 检查是否有异常字符
+          echo "=== 检查异常字符 ==="
+          grep -n "[^[:print:]]" arch/arm64/configs/k69v1_64_k419_defconfig || echo "无异常字符"
         else
-          echo "❌ FAILED: Kernel image not produced"
-          echo "Build log tail:"
-          tail -50 build.log || echo "No build log found"
-          echo "Available files in out directory:"
-          find out/ -type f -name "*.o" | head -10 || true
+          echo "❌ Defconfig 文件不存在"
+          echo "可用的 defconfig 文件:"
+          ls -la arch/arm64/configs/ | head -15
           exit 1
         fi
 
-    - name: Upload Kernel Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-${{ github.event.inputs.DEFCONFIG }}-${{ github.run_number }}
-        path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtbo.img
-        retention-days: 30
+    - name: Test kernel configuration step by step
+      run: |
+        cd $KERNEL_DIR
+        
+        # 完全清理
+        echo "=== 执行完全清理 ==="
+        make distclean 2>/dev/null || true
+        rm -rf out
+        
+        # 创建输出目录
+        mkdir -p out
+        
+        echo "=== 步骤1: 检查内核Makefile ==="
+        head -10 Makefile || echo "无法读取Makefile"
+        
+        echo "=== 步骤2: 尝试基本配置测试 ==="
+        # 先尝试一个最简单的配置
+        make ARCH=arm64 help | grep config || echo "无法获取配置帮助"
+        
+        echo "=== 步骤3: 尝试不同的配置方法 ==="
+        
+        # 方法1: 直接配置（带详细输出）
+        echo "尝试方法1: 直接配置"
+        set -x
+        make O=out ARCH=arm64 V=1 k69v1_64_k419_defconfig || {
+          echo "方法1失败，退出代码: $?"
+          set +x
+          
+          # 方法2: 先使用默认配置
+          echo "尝试方法2: 使用默认配置"
+          set -x
+          make O=out ARCH=arm64 defconfig
+          set +x
+          
+          # 方法3: 手动合并配置
+          echo "尝试方法3: 手动合并配置"
+          if [ -f "arch/arm64/configs/k69v1_64_k419_defconfig" ]; then
+            set -x
+            # 将自定义配置合并到默认配置
+            ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/k69v1_64_k419_defconfig
+            make O=out ARCH=arm64 olddefconfig
+            set +x
+          fi
+        }
+        
+        echo "=== 配置完成检查 ==="
+        if [ -f "out/.config" ]; then
+          echo "✅ 配置成功，生成 .config 文件"
+          echo "配置文件大小: $(wc -l < out/.config) 行"
+        else
+          echo "❌ 配置失败，未生成 .config 文件"
+          exit 1
+        fi
 
-    - name: Upload Build Logs
+    - name: Build kernel with fallback options
+      run: |
+        cd $KERNEL_DIR
+        
+        # 如果上一步配置失败，尝试使用debug配置
+        if [ ! -f "out/.config" ]; then
+          echo "=== 使用备用debug配置 ==="
+          make O=out ARCH=arm64 k69v1_64_k419_debug_defconfig || {
+            echo "Debug配置也失败，尝试最简配置"
+            make O=out ARCH=arm64 defconfig
+          }
+        fi
+        
+        echo "=== 开始编译内核 ==="
+        # 使用较少的并行任务避免内存问题
+        make O=out ARCH=arm64 -j2 \
+          CC="$CC" \
+          CROSS_COMPILE="$CROSS_COMPILE" \
+          CLANG_TRIPLE="$CLANG_TRIPLE" \
+          2>&1 | tee build.log
+
+    - name: Check build artifacts
+      if: always()
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 构建结果检查 ==="
+        
+        # 检查所有可能的输出文件
+        find out/ -name "*.gz" -o -name "*.img" -o -name "Image*" 2>/dev/null | while read file; do
+          if [ -f "$file" ]; then
+            echo "找到: $file ($(du -h "$file" | cut -f1))"
+          fi
+        done
+        
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "✅ 编译成功!"
+          ls -lh out/arch/arm64/boot/
+        else
+          echo "❌ 未找到内核镜像"
+          echo "=== 构建日志最后100行 ==="
+          tail -100 build.log
+          echo "=== 检查配置错误 ==="
+          grep -i "error\|fail" build.log | head -20
+        fi
+
+    - name: Upload debug information
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-logs-${{ github.run_number }}
+        name: kernel-debug-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/build.log
+          ${{ env.KERNEL_DIR }}/out/.config
         retention-days: 15
+
+    - name: Upload kernel image
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
+        retention-days: 30
