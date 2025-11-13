@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Error Collection Mode)
+name: Build MT6768 Kernel (Self-Maintained)
 
 on:
   workflow_dispatch:
@@ -20,6 +20,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install dependencies
       run: |
@@ -28,7 +30,7 @@ jobs:
           build-essential bc bison flex libssl-dev libelf-dev \
           git wget unzip python3 \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-          libncurses-dev dwarves curl file tree
+          libncurses-dev dwarves curl file tree patch
         sudo ln -sf /usr/bin/python3 /usr/bin/python
 
     - name: Clone kernel source
@@ -37,6 +39,29 @@ jobs:
           https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
+
+    - name: Fix kernel compilation issues
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 修复内核编译问题 ==="
+        
+        # 修复 try_to_unmap 参数问题
+        if [ -f "mm/huge_memory.c" ]; then
+          echo "修复 mm/huge_memory.c..."
+          sed -i 's/try_to_unmap(page)/try_to_unmap(page, 0)/g' mm/huge_memory.c
+        fi
+        
+        # 修复格式字符串问题
+        if [ -f "drivers/misc/mediatek/blocktag/blocktag-core.c" ]; then
+          echo "修复 blocktag-core.c..."
+          sed -i 's/"%s %d %d"/"%s %zu %zu"/g' drivers/misc/mediatek/blocktag/blocktag-core.c
+        fi
+        
+        # 修复 thermal cooling 问题
+        if [ -f "drivers/thermal/cpu_cooling.c" ]; then
+          echo "修复 cpu_cooling.c..."
+          sed -i 's/^int cpufreq_platform_cooling_register/static int cpufreq_platform_cooling_register/g' drivers/thermal/cpu_cooling.c
+        fi
 
     - name: Configure kernel
       run: |
@@ -48,232 +73,53 @@ jobs:
         
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
         
-        # 禁用一些已知的问题配置，但不修改源码
+        # 禁用问题配置
         ./scripts/config --file out/.config -d DEBUG_INFO
         ./scripts/config --file out/.config -d GDB_SCRIPTS
+        ./scripts/config --file out/.config -d MTK_CM_MGR
         
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-    - name: Build kernel and collect errors
+    - name: Build kernel
       run: |
         cd $KERNEL_DIR
-        echo "=== 编译内核并收集错误信息 ==="
+        echo "=== 编译内核 ==="
         
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        # 使用 -k 参数让编译在遇到错误时继续，收集更多错误信息
-        time make O=out ARCH=arm64 -j$(nproc) -k \
+        time make O=out ARCH=arm64 -j$(nproc) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-memset-elt-size" \
           2>&1 | tee build.log
 
-    - name: Analyze build errors
+    - name: Check build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 构建错误分析 ==="
-        echo "=========================================="
-        
-        # 检查是否生成了任何内核文件
-        echo "## 生成文件检查"
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "✅ out/arch/arm64/boot/Image.gz - 存在"
-          echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
-        else
-          echo "❌ out/arch/arm64/boot/Image.gz - 缺失"
-        fi
-        
-        if [ -f "out/vmlinux" ]; then
-          echo "⚠️ out/vmlinux - 存在 (但没有压缩镜像)"
-        else
-          echo "❌ out/vmlinux - 缺失"
-        fi
-        
-        echo ""
-        echo "## 编译统计"
-        object_count=$(find out/ -name "*.o" -type f 2>/dev/null | wc -l)
-        echo "编译的对象文件: $object_count"
-        
-        if [ -f "build.log" ]; then
-          error_count=$(grep -c "error:" build.log || echo 0)
-          warning_count=$(grep -c "warning:" build.log || echo 0)
-          echo "错误数量: $error_count"
-          echo "警告数量: $warning_count"
-        fi
-        
-        echo ""
-        echo "## 主要错误分类"
-        
-        if [ -f "build.log" ]; then
-          # 收集所有错误
-          echo "### 所有编译错误:"
-          grep "error:" build.log | sort -u | head -20
-          
-          echo ""
-          echo "### 错误类型统计:"
-          grep "error:" build.log | sed 's/.*error: //' | sort | uniq -c | sort -nr | head -10
-        fi
-
-    - name: Generate comprehensive error report
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 综合错误报告 ==="
-        echo "=========================================="
-        
-        # 创建详细的错误报告
-        cat > error_report.md << 'EOF'
-        # 内核构建错误报告
-        
-        ## 构建环境
-        - 系统: Ubuntu 24.04 (noble)
-        - 内核版本: 4.19
-        - 架构: arm64
-        - 设备: MT6768
-        - 仓库: https://github.com/NullableIsBellable/Gale-Kernel-Source.git
-        
-        ## 构建结果
-        EOF
-        
-        # 添加构建状态
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "- 状态: ✅ 部分成功" >> error_report.md
-          echo "- 内核镜像: 已生成" >> error_report.md
-        else
-          echo "- 状态: ❌ 失败" >> error_report.md
-          echo "- 内核镜像: 未生成" >> error_report.md
-        fi
-        
-        # 添加错误摘要
-        cat >> error_report.md << 'EOF'
-        
-        ## 主要编译错误
-        
-        EOF
-        
-        if [ -f "build.log" ]; then
-          # 提取主要错误
-          grep "error:" build.log | head -10 | while read error; do
-            echo "- $error" >> error_report.md
-          done
-        fi
-        
-        cat >> error_report.md << 'EOF'
-        
-        ## 问题分析
-        
-        基于收集的错误信息，主要问题包括:
-        
-        ### 1. API 不兼容问题
-        - `try_to_unmap` 函数调用参数不匹配
-        - 内核版本间的接口变化
-        
-        ### 2. 配置问题  
-        - 某些驱动配置与当前环境不兼容
-        
-        ### 3. 工具链兼容性
-        - 新版本编译器对旧代码的严格检查
-        
-        ## 建议的修复方案
-        
-        ### 短期解决方案
-        1. 使用 `make -k` 继续构建，忽略部分错误
-        2. 禁用导致编译错误的驱动模块
-        3. 使用更宽松的编译标志
-        
-        ### 长期解决方案
-        1. 为内核源码创建专门的补丁集
-        2. 联系维护者获取更新
-        3. 考虑使用更新的内核版本
-        
-        ### 手动修复重点
-        需要重点关注以下文件的修复:
-        - `mm/huge_memory.c` 中的 `try_to_unmap` 调用
-        - 其他报告错误的源文件
-        
-        ## 下一步行动
-        
-        1. 根据此报告中的错误信息，创建针对性的修复补丁
-        2. 优先修复阻止内核链接的关键错误
-        3. 逐步解决所有编译警告和错误
-        
-        EOF
-        
-        echo "错误报告已生成: error_report.md"
-        cat error_report.md
-
-    - name: Attempt partial recovery
-      if: failure()
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 尝试部分恢复 ==="
-        
-        # 检查是否有足够对象文件可以尝试链接
-        object_count=$(find out/ -name "*.o" -type f 2>/dev/null | wc -l)
-        echo "可用对象文件: $object_count"
-        
-        if [ $object_count -gt 1000 ]; then
-          echo "尝试手动链接..."
-          
-          # 收集对象文件
-          find out/ -name "*.o" -type f > objects.list 2>/dev/null
-          
-          if [ -f "out/arch/arm64/kernel/vmlinux.lds" ]; then
-            echo "使用链接脚本尝试链接..."
-            aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux.attempt \
-              -T out/arch/arm64/kernel/vmlinux.lds @objects.list 2>&1 | tail -5 || echo "链接失败"
-          fi
-          
-          # 检查是否生成了vmlinux
-          if [ -f "out/vmlinux.attempt" ]; then
-            echo "✅ 手动链接成功"
-            mv out/vmlinux.attempt out/vmlinux
-            
-            # 尝试生成内核镜像
-            mkdir -p out/arch/arm64/boot
-            aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image
-            gzip out/arch/arm64/boot/Image
-            echo "✅ 生成 Image.gz 成功"
-          fi
-        fi
-
-    - name: Upload artifacts and reports
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-error-report-${{ github.run_number }}
-        path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
-          ${{ env.KERNEL_DIR }}/build.log
-          ${{ env.KERNEL_DIR }}/error_report.md
-        retention-days: 30
-
-    - name: Final summary
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 最终总结 ==="
-        echo "=========================================="
+        echo "=== 检查构建结果 ==="
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "🎉 成功生成了内核镜像!"
-          echo ""
-          echo "注意: 虽然编译过程中有错误，但最终生成了可用的内核镜像。"
-          echo "建议在设备上测试此内核的功能完整性。"
-          echo ""
+          echo "✅ 内核编译成功!"
           echo "文件: out/arch/arm64/boot/Image.gz"
           echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
         else
-          echo "❌ 编译失败，但收集了完整的错误信息"
-          echo ""
-          echo "## 收集到的关键信息:"
-          if [ -f "build.log" ]; then
-            echo "- 错误数量: $(grep -c "error:" build.log || echo 0)"
-            echo "- 警告数量: $(grep -c "warning:" build.log || echo 0)"
-            echo "- 编译的对象文件: $(find out/ -name "*.o" -type f 2>/dev/null | wc -l)"
-          fi
-          echo ""
-          echo "## 下一步建议:"
-          echo "1. 查看 error_report.md 了解详细错误分析"
-          echo "2. 根据报告中的错误信息创建针对性的修复补丁"
-          echo "3. 优先修复阻止内核链接的关键错误"
-          echo "4. 考虑联系内核维护者报告这些问题"
+          echo "❌ 编译失败"
+          echo "错误摘要:"
+          grep "error:" build.log | head -5 || echo "无错误信息"
         fi
+
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
+          ${{ env.KERNEL_DIR }}/build.log
+        retention-days: 30
+
+    - name: Create build summary
+      if: always()
+      run: |
+        echo "=== 构建完成 ==="
+        echo "工作流运行完成，请下载 Artifacts 查看结果"
