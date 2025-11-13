@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Direct Approach)
+name: Build MT6768 Kernel (Ubuntu 22.04 Final Attempt)
 
 on:
   workflow_dispatch:
@@ -21,18 +21,21 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install alternative toolchains
+    - name: Install Ubuntu 22.04 compatible toolchain
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
           git wget unzip python2.7 python2.7-dev \
-          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          gcc-aarch64-linux-gnu gcc-11-aarch64-linux-gnu \
+          gcc-10-aarch64-linux-gnu gcc-9-aarch64-linux-gnu \
           libncurses-dev dwarves curl file tree
-          
-        # 安装Clang作为备选工具链
-        sudo apt-get install -y clang lld
         sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
+
+        # 下载针对Ubuntu 22.04的兼容工具链
+        wget https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/aarch64--glibc--stable-2022.08-1.tar.bz2
+        tar -xf aarch64--glibc--stable-2022.08-1.tar.bz2
+        echo "BOOTLIN_TOOLCHAIN=$(pwd)/aarch64--glibc--stable-2022.08-1/bin/aarch64-buildroot-linux-gnu-" >> $GITHUB_ENV
 
     - name: Clone kernel source
       run: |
@@ -41,209 +44,246 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Direct compile.h creation
+    - name: Pre-create essential build files
       run: |
         cd $KERNEL_DIR
-        echo "=== 直接创建 compile.h ==="
+        echo "=== 预创建必要的构建文件 ==="
         
         rm -rf out
-        mkdir -p out/include/generated
+        mkdir -p out/include/generated out/arch/arm64/include/generated out/scripts
         
-        # 创建完整的 compile.h 文件
+        # 创建 compile.h
         cat > out/include/generated/compile.h << 'EOF'
         #define UTS_MACHINE "aarch64"
         #define UTS_VERSION "#1 SMP PREEMPT $(date +%Y%m%d)"
-        #define LINUX_COMPILE_BY "github-actions"
-        #define LINUX_COMPILE_HOST "github"
-        #define LINUX_COMPILER "gcc version $(aarch64-linux-gnu-gcc -dumpversion)"
-        #define LINUX_COMPILE_DOMAIN ""
-        #define VERMAGIC_STRING "4.19.0-github"
+        #define LINUX_COMPILE_BY "github-actions-22.04"
+        #define LINUX_COMPILE_HOST "github-actions"
+        #define LINUX_COMPILER "aarch64-linux-gnu-gcc (Ubuntu 11.3.0-1ubuntu1~22.04) 11.3.0"
+        #define LINUX_COMPILE_DOMAIN "(none)"
+        #define VERMAGIC_STRING "4.19.0-github-actions-22.04 SMP preempt mod_unload aarch64"
         EOF
         
-        echo "手动创建了 compile.h"
+        # 创建 autoconf.h
+        cat > out/include/generated/autoconf.h << 'EOF'
+        #define CONFIG_CC_HAS_ASM_INLINE 1
+        #define CONFIG_ARM64 1
+        #define CONFIG_64BIT 1
+        EOF
+        
+        echo "✅ 预创建了必要的头文件"
 
-    - name: Try Clang compilation
+    - name: Build with Bootlin toolchain
       run: |
         cd $KERNEL_DIR
-        echo "=== 尝试使用 Clang 编译 ==="
+        echo "=== 使用 Bootlin 工具链构建 ==="
         
-        # 使用 defconfig
-        make O=out ARCH=arm64 defconfig
+        # 使用 Bootlin 工具链配置
+        make O=out ARCH=arm64 CROSS_COMPILE=${{ env.BOOTLIN_TOOLCHAIN }} defconfig
         
-        # 设置使用 Clang
-        ./scripts/config --file out/.config -d CC_IS_GCC
-        ./scripts/config --file out/.config -e CC_IS_CLANG
-        ./scripts/config --file out/.config -e LD_IS_LLD
+        # 应用最小化配置
+        ./scripts/config --file out/.config -d MTK_CM_MGR
+        ./scripts/config --file out/.config -d UCLAMP_TASK
+        ./scripts/config --file out/.config -d BLK_INLINE_ENCRYPTION
         
-        # 禁用问题配置
-        for config in MTK_CM_MGR UCLAMP_TASK BLK_INLINE_ENCRYPTION; do
-          ./scripts/config --file out/.config -d $config 2>/dev/null || true
-        done
+        make O=out ARCH=arm64 CROSS_COMPILE=${{ env.BOOTLIN_TOOLCHAIN }} olddefconfig
         
-        make O=out ARCH=arm64 olddefconfig
-        
-        echo "使用 Clang 编译..."
+        echo "使用 Bootlin 工具链编译..."
         time make O=out ARCH=arm64 -j$(nproc) \
-          CC=clang LD=ld.lld \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          2>&1 | tee build_clang.log
+          CROSS_COMPILE=${{ env.BOOTLIN_TOOLCHAIN }} \
+          KCFLAGS="-Wno-error -Wno-format -Wno-memset-elt-size" \
+          2>&1 | tee build_bootlin.log
 
-    - name: Try GCC with minimal config
-      if: failure()
+    - name: Comprehensive result analysis
+      if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 使用 GCC 和最小配置 ==="
+        echo "=== 综合构建结果分析 ==="
+        echo "=========================================="
         
-        rm -rf out
-        mkdir -p out
-        
-        # 使用 tinyconfig
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- tinyconfig
-        
-        # 启用必要配置
-        ./scripts/config --file out/.config -e ARM64
-        ./scripts/config --file out/.config -e MMU
-        ./scripts/config --file out/.config -e TTY
-        ./scripts/config --file out/.config -e SERIAL_AMBA_PL010
-        ./scripts/config --file out/.config -e SERIAL_AMBA_PL010_CONSOLE
-        ./scripts/config --file out/.config -e PRINTK
-        
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-        
-        echo "最小配置编译..."
-        time make O=out ARCH=arm64 -j$(nproc) \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          2>&1 | tee build_minimal.log
-
-    - name: Direct object compilation and linking
-      if: failure()
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 直接编译和链接对象文件 ==="
-        
-        # 清理并重新配置
-        rm -rf out
-        mkdir -p out
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-        
-        # 编译核心目录
-        echo "分步编译..."
-        for dir in init kernel arch/arm64/kernel lib mm fs ipc security crypto block drivers/base; do
-          if [ -d "$dir" ]; then
-            echo "编译 $dir..."
-            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $dir/ -j$(nproc) 2>&1 | tail -3 || echo "$dir 编译完成或有警告"
-          fi
-        done
-
-    - name: Force manual vmlinux creation
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 强制手动创建 vmlinux ==="
-        
-        # 收集所有对象文件
-        find out/ -name "*.o" -type f > objects.list
-        
-        object_count=$(wc -l < objects.list)
-        echo "找到 $object_count 个对象文件"
-        
-        if [ $object_count -gt 1000 ]; then
-          echo "尝试手动链接 vmlinux..."
-          
-          # 使用链接脚本
-          if [ -f "out/arch/arm64/kernel/vmlinux.lds" ]; then
-            echo "使用 vmlinux.lds 链接..."
-            aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
-              -T out/arch/arm64/kernel/vmlinux.lds @objects.list 2>&1 | tail -20 || {
-              echo "第一次链接失败，尝试简化链接..."
-              
-              # 尝试不使用链接脚本
-              aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
-                @objects.list 2>&1 | tail -10 || echo "简化链接也失败"
-            }
+        # 检查关键文件
+        echo "## 核心文件检查"
+        for file in "out/vmlinux" "out/arch/arm64/boot/Image" "out/arch/arm64/boot/Image.gz"; do
+          if [ -f "$file" ]; then
+            echo "✅ $file - 存在 ($(du -h "$file" | cut -f1))"
           else
-            echo "没有找到 vmlinux.lds，尝试直接链接"
-            aarch64-linux-gnu-ld -EL -p --no-undefined -X --build-id -o out/vmlinux \
-              @objects.list 2>&1 | tail -10 || echo "直接链接失败"
+            echo "❌ $file - 缺失"
           fi
-        else
-          echo "对象文件数量不足，无法链接"
+        done
+        
+        echo ""
+        echo "## 构建进度统计"
+        object_count=$(find out/ -name "*.o" -type f 2>/dev/null | wc -l)
+        build_log_lines=$(wc -l < build_bootlin.log 2>/dev/null || echo 0)
+        echo "📊 编译的对象文件: $object_count"
+        echo "📊 构建日志行数: $build_log_lines"
+        
+        if [ -f "build_bootlin.log" ]; then
+          errors=$(grep -c "error:" build_bootlin.log || echo 0)
+          warnings=$(grep -c "warning:" build_bootlin.log || echo 0)
+          echo "📊 错误数量: $errors"
+          echo "📊 警告数量: $warnings"
+          
+          echo ""
+          echo "## 主要错误类型"
+          grep "error:" build_bootlin.log | sort | uniq -c | sort -nr | head -10 || echo "无错误统计"
         fi
+        
+        echo ""
+        echo "## 工具链信息"
+        echo "主工具链: aarch64-linux-gnu-gcc"
+        aarch64-linux-gnu-gcc --version | head -1 || echo "无法获取版本"
+        echo "Bootlin工具链: ${{ env.BOOTLIN_TOOLCHAIN }}"
+        ${{ env.BOOTLIN_TOOLCHAIN }}gcc --version | head -1 || echo "无法获取Bootlin版本"
 
-    - name: Create kernel image from objects
+    - name: Generate detailed summary report
+      if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 从对象文件创建内核镜像 ==="
+        echo "=== 详细构建总结报告 ==="
+        echo "=========================================="
+        echo ""
         
-        if [ -f "out/vmlinux" ]; then
-          echo "找到 vmlinux，生成 Image..."
-          mkdir -p out/arch/arm64/boot
-          
-          aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image 2>&1 | tail -5 && {
-            echo "✅ 生成 Image 成功"
-            gzip -k -f out/arch/arm64/boot/Image
-            echo "✅ 生成 Image.gz 成功"
-          } || echo "objcopy 失败"
+        # 构建状态
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "🎉 🎉 🎉 构建状态: 成功"
+          echo "✅ 成功生成了可用的内核镜像"
+          echo "📁 文件位置: out/arch/arm64/boot/Image.gz"
+          echo "💾 文件大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
         else
-          echo "没有 vmlinux，尝试从对象文件直接生成 Image"
+          echo "❌ 构建状态: 失败"
+          echo ""
+          echo "## 问题深度分析"
+          echo ""
           
-          # 尝试直接链接为二进制
-          if [ -f "objects.list" ] && [ $(wc -l < objects.list) -gt 1000 ]; then
-            echo "尝试直接链接为二进制镜像..."
-            aarch64-linux-gnu-ld -EL -Ttext=0x40080000 --build-id -o out/arch/arm64/boot/Image -s @objects.list 2>&1 | tail -5 && {
-              echo "✅ 直接生成 Image 成功"
-              gzip -k -f out/arch/arm64/boot/Image
-              echo "✅ 生成 Image.gz 成功"
-            } || echo "直接链接失败"
+          # 检查具体错误
+          if [ -f "build_bootlin.log" ]; then
+            if grep -q "Unterminated quoted string" build_bootlin.log; then
+              echo "🔍 主要问题: Shell脚本语法错误"
+              echo "   可能原因: 环境变量污染或脚本格式问题"
+              echo "   建议: 检查内核源码中的shell脚本，特别是mkcompile_h"
+            fi
+            
+            if grep -q "function body not available" build_bootlin.log; then
+              echo "🔍 主要问题: 内联函数体缺失"
+              echo "   可能原因: 配置选项未正确启用或源码缺陷"
+              echo "   建议: 检查BLK_INLINE_ENCRYPTION相关配置"
+            fi
+            
+            if grep -q "memset-elt-size" build_bootlin.log; then
+              echo "🔍 主要问题: memset使用错误"
+              echo "   可能原因: 代码规范问题或编译器版本不兼容"
+              echo "   建议: 修复mediatek驱动中的memset调用"
+            fi
+            
+            if grep -q "format expects" build_bootlin.log; then
+              echo "🔍 主要问题: 格式字符串错误"
+              echo "   可能原因: 参数类型不匹配"
+              echo "   建议: 检查printk和相关日志调用"
+            fi
           fi
+          
+          echo ""
+          echo "## 根本原因总结"
+          echo "基于多次构建尝试的分析，主要问题可能包括:"
+          echo "1. 🔧 内核源码与Ubuntu 22.04工具链的兼容性问题"
+          echo "2. 📝 源码中的shell脚本语法错误" 
+          echo "3. ⚙️ 特定MTK驱动与主线内核的集成问题"
+          echo "4. 🛠️ 编译环境与内核构建系统的不匹配"
+          
+          echo ""
+          echo "## 后续行动建议"
+          echo ""
+          echo "### 短期解决方案:"
+          echo "1. 📥 使用设备厂商提供的预编译内核"
+          echo "2. 🔄 寻找已知可构建的内核源码分支"
+          echo "3. 🏠 在Ubuntu 18.04/20.04环境中手动构建"
+          
+          echo ""
+          echo "### 长期解决方案:"
+          echo "1. 📋 向内核维护者报告构建问题"
+          echo "2. 🔍 逐文件修复编译错误"
+          echo "3. 📚 使用更新的内核版本（如4.19.y稳定版）"
+          
+          echo ""
+          echo "### 技术深度修复:"
+          echo "1. 🔧 手动修复shell脚本中的引号问题"
+          echo "2. ⚙️ 为缺失的函数提供桩实现"
+          echo "3. 🛠️ 调整内核配置以禁用问题驱动"
+          
+          echo ""
+          echo "## 资源参考"
+          echo "- 📖 内核编译文档: https://www.kernel.org/doc/html/latest/"
+          echo "- 🐛 问题追踪: https://bugzilla.kernel.org/"
+          echo "- 💬 社区支持: Linux内核邮件列表和论坛"
         fi
-
-    - name: Check and package results
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 检查和打包结果 ==="
         
-        echo "生成的文件:"
-        find out/ -type f \( -name "vmlinux*" -o -name "Image*" -o -name "*.gz" \) -exec ls -la {} \; 2>/dev/null || echo "没有找到内核文件"
-        
-        # 检查对象文件
-        echo "对象文件统计:"
-        find out/ -name "*.o" | wc -l
+        echo ""
+        echo "=========================================="
+        echo "构建尝试完成时间: $(date)"
+        echo "工作流运行ID: ${{ github.run_id }}"
+        echo "工作流运行序号: ${{ github.run_number }}"
 
-    - name: Upload all artifacts
+    - name: Upload final artifacts and report
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-direct-build-${{ github.run_number }}
+        name: kernel-ubuntu-22.04-final-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/out/
           ${{ env.KERNEL_DIR }}/build_*.log
-          ${{ env.KERNEL_DIR }}/objects.list
         retention-days: 30
 
-    - name: Final analysis
+    - name: Create build summary file
+      if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 最终分析 ==="
+        # 创建详细的构建总结文件
+        {
+          echo "# 内核构建总结报告"
+          echo "构建时间: $(date)"
+          echo "工作流: ${{ github.workflow }}"
+          echo "运行ID: ${{ github.run_id }}"
+          echo "运行序号: ${{ github.run_number }}"
+          echo "仓库: ${{ github.repository }}"
+          echo ""
+          echo "## 构建环境"
+          echo "- 系统: Ubuntu 22.04"
+          echo "- 内核源码: mt6768-4.19 分支"
+          echo "- 架构: arm64"
+          echo ""
+          echo "## 工具链信息"
+          echo "- 默认GCC: $(aarch64-linux-gnu-gcc --version | head -1)"
+          echo "- Bootlin工具链: ${{ env.BOOTLIN_TOOLCHAIN }}"
+          echo ""
+          echo "## 构建结果"
+          if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+            echo "状态: ✅ 成功"
+            echo "内核镜像: out/arch/arm64/boot/Image.gz"
+            echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
+          else
+            echo "状态: ❌ 失败"
+            echo "错误摘要:"
+            if [ -f "build_bootlin.log" ]; then
+              grep "error:" build_bootlin.log | head -5 | while read line; do
+                echo "- $line"
+              done
+            fi
+          fi
+          echo ""
+          echo "## 建议"
+          echo "如需进一步帮助，请提供:"
+          echo "1. 完整的构建日志"
+          echo "2. 内核源码的具体提交哈希"
+          echo "3. 目标设备的详细信息"
+        } > build_summary.md
         
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "🎉 成功生成内核镜像!"
-          echo "文件: out/arch/arm64/boot/Image.gz"
-          echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
-        elif [ -f "out/vmlinux" ]; then
-          echo "⚠️ 生成了 vmlinux 但没有压缩镜像"
-          echo "运行: gzip -c out/vmlinux > Image.gz"
-        else
-          echo "❌ 编译失败"
-          echo ""
-          echo "根本问题分析:"
-          echo "1. 内核源码可能存在严重的不兼容问题"
-          echo "2. 工具链版本不匹配"
-          echo "3. 需要手动修复内核构建系统"
-          echo ""
-          echo "建议的下一步:"
-          echo "1. 尝试在本地Ubuntu 22.04环境编译"
-          echo "2. 使用不同的内核源码分支"
-          echo "3. 联系内核源码维护者报告问题"
-          echo "4. 考虑使用预编译的内核"
-        fi
+        # 上传总结文件
+        echo "BUILD_SUMMARY_FILE=$KERNEL_DIR/build_summary.md" >> $GITHUB_ENV
+
+    - name: Upload build summary
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-summary-${{ github.run_number }}
+        path: ${{ env.BUILD_SUMMARY_FILE }}
+        retention-days: 30
