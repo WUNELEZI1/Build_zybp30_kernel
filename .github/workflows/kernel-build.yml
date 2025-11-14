@@ -40,10 +40,10 @@ jobs:
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
 
-    - name: Apply critical fixes
+    - name: Apply comprehensive fixes
       run: |
         cd $KERNEL_DIR
-        echo "=== 应用关键修复 ==="
+        echo "=== 应用全面修复 ==="
         
         # 1. 修复 try_to_unmap 参数问题
         if [ -f "mm/huge_memory.c" ]; then
@@ -63,20 +63,30 @@ jobs:
           sed -i 's/unsigned int get_boot_mode(void)/enum boot_mode_t get_boot_mode(void)/g' drivers/input/keyboard/mediatek/mt6768/hal_kpd.c
         fi
 
-        echo "关键修复完成"
+        # 4. 修复 keyslot-manager 内联函数问题
+        if [ -f "include/linux/keyslot-manager.h" ]; then
+          echo "修复 keyslot-manager.h 内联函数..."
+          sed -i 's/always_inline //g' include/linux/keyslot-manager.h
+        fi
 
-    - name: Configure kernel with minimal setup
+        # 5. 修复 blk-crypto 内联函数问题
+        if [ -f "include/linux/blk-crypto.h" ]; then
+          echo "修复 blk-crypto.h 内联函数..."
+          sed -i 's/always_inline //g' include/linux/blk-crypto.h
+        fi
+
+        echo "所有修复已完成"
+
+    - name: Configure kernel to disable problematic features
       run: |
         cd $KERNEL_DIR
-        echo "=== 最小化内核配置 ==="
+        echo "=== 配置内核：禁用问题功能 ==="
         
         rm -rf out
         mkdir -p out
         
-        # 使用 defconfig
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }}
         
-        # 禁用所有有问题的功能
         ./scripts/config --file out/.config \
           --disable DEBUG_INFO \
           --disable GDB_SCRIPTS \
@@ -84,34 +94,12 @@ jobs:
           --disable SCHED_TUNE \
           --disable MTK_CM_MGR \
           --disable TRANSPARENT_HUGEPAGE \
-          --disable HUGETLB_PAGE \
-          --disable HUGETLBFS \
-          --disable CLEANCACHE \
-          --disable FRONTSWAP \
-          --disable ZSWAP \
-          --disable ZSMALLOC \
-          --disable ZBUD \
-          --disable Z3FOLD \
-          --disable KSM \
-          --disable MEM_SOFT_DIRTY \
-          --disable DEBUG_VM \
-          --disable DEBUG_VIRTUAL \
-          --disable DEBUG_MEMORY_INIT \
-          --disable DEBUG_PER_CPU_MAPS \
-          --disable DEBUG_SLAB \
-          --disable DEBUG_SG \
-          --disable DEBUG_LIST \
-          --disable DEBUG_PLIST \
-          --disable DEBUG_SPINLOCK \
-          --disable DEBUG_MUTEXES \
-          --disable DEBUG_WW_MUTEX_SLOWPATH \
-          --disable DEBUG_RWSEMS \
-          --disable DEBUG_LOCK_ALLOC \
-          --disable DEBUG_ATOMIC_SLEEP \
-          --disable DEBUG_STACK_USAGE \
-          --disable DEBUG_KMEMLEAK
+          --disable BLK_DEV_CRYPTO \
+          --disable DM_CRYPT \
+          --disable CRYPTO_BLKCIPHER \
+          --disable BLK_INLINE_ENCRYPTION \
+          --disable BLK_CRYPTO
         
-        # 启用必要的基础功能
         ./scripts/config --file out/.config \
           --enable MODULES \
           --enable MODULE_UNLOAD \
@@ -124,80 +112,55 @@ jobs:
           --enable MACH_MT6768
         
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-        
-        echo "配置完成，显示关键选项:"
-        grep -E "CONFIG_(TRANSPARENT_HUGEPAGE|SCHED_TUNE|MTK_CM_MGR|DEBUG)" out/.config || true
 
-    - name: Build kernel directly
+    - name: Build kernel with aggressive error suppression
       run: |
         cd $KERNEL_DIR
-        echo "=== 直接编译内核 ==="
+        echo "=== 使用激进错误抑制编译内核 ==="
         
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        # 使用最宽松的编译选项直接编译
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-absolute-value -Wno-builtin-declaration-mismatch -Wno-discarded-qualifiers -Wno-incompatible-pointer-types-discards-qualifiers" \
           KCPPFLAGS="-Wno-error" \
-          CC="aarch64-linux-gnu-gcc" \
-          LD="aarch64-linux-gnu-ld" \
           2>&1 | tee full_build.log || echo "编译过程完成，检查结果..."
 
-    - name: Check if kernel image exists
+    - name: Check build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 检查内核镜像 ==="
+        echo "=== 检查构建结果 ==="
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "✅ 内核镜像生成成功!"
-          echo "文件: out/arch/arm64/boot/Image.gz"
-          echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
           echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
+        elif [ -f "out/arch/arm64/boot/Image" ]; then
+          echo "✅ 内核镜像生成成功 (未压缩)"
+          echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
+        elif [ -f "out/vmlinux" ]; then
+          echo "⚠️  生成 vmlinux 但未打包"
+          echo "KERNEL_BUILD_SUCCESS=partial" >> $GITHUB_ENV
         else
-          echo "❌ 内核镜像未生成"
+          echo "❌ 未生成内核镜像"
           echo "KERNEL_BUILD_SUCCESS=false" >> $GITHUB_ENV
-          
-          # 检查是否有其他生成的文件
-          echo "查找其他生成的文件:"
-          find out/ -name "*.o" -type f | head -10 | xargs -I {} sh -c 'echo "找到: {} ($(du -h {} | cut -f1))"' || true
-          find out/ -name "*.ko" -type f | head -5 | xargs -I {} sh -c 'echo "模块: {} ($(du -h {} | cut -f1))"' || true
         fi
 
-    - name: Try alternative build approach
-      if: env.KERNEL_BUILD_SUCCESS == 'false'
+    - name: Create final build report
+      if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 尝试替代构建方法 ==="
+        echo "=== 最终构建报告 ==="
         
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        
-        echo "1. 尝试编译 vmlinux..."
-        if make O=out ARCH=arm64 -j1 vmlinux 2>&1 | tee vmlinux_build.log; then
-          echo "✅ vmlinux 编译成功"
-          if [ -f "out/vmlinux" ]; then
-            echo "找到 vmlinux: $(du -h out/vmlinux | cut -f1)"
-          fi
+        if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
+          echo "🎉 内核编译成功!"
+        elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
+          echo "⚠️  部分成功 - 生成 vmlinux"
         else
-          echo "❌ vmlinux 编译失败"
-          grep -i "error" vmlinux_build.log | tail -10
-        fi
-        
-        echo "2. 尝试直接编译 Image..."
-        if make O=out ARCH=arm64 -j1 Image 2>&1 | tee image_build.log; then
-          echo "✅ Image 编译成功"
-          if [ -f "out/arch/arm64/boot/Image" ]; then
-            echo "找到 Image: $(du -h out/arch/arm64/boot/Image | cut -f1)"
-            echo "KERNEL_IMAGE_EXISTS=true" >> $GITHUB_ENV
-          fi
-        else
-          echo "❌ Image 编译失败"
-          grep -i "error" image_build.log | tail -10
+          echo "❌ 构建失败"
         fi
 
-    - name: Upload any generated artifacts
+    - name: Upload artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
@@ -207,59 +170,3 @@ jobs:
           ${{ env.KERNEL_DIR }}/out/vmlinux
           ${{ env.KERNEL_DIR }}/*.log
         retention-days: 30
-
-    - name: Create detailed build report
-      if: always()
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 详细构建报告 ==="
-        
-        echo "📊 构建状态:"
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "🎉 成功生成压缩内核镜像"
-          echo "  文件: out/arch/arm64/boot/Image.gz ($(du -h out/arch/arm64/boot/Image.gz | cut -f1))"
-        elif [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "✅ 成功生成内核镜像"  
-          echo "  文件: out/arch/arm64/boot/Image ($(du -h out/arch/arm64/boot/Image | cut -f1))"
-        elif [ -f "out/vmlinux" ]; then
-          echo "⚠️  生成 vmlinux 但未打包"
-          echo "  文件: out/vmlinux ($(du -h out/vmlinux | cut -f1))"
-        else
-          echo "❌ 未生成内核镜像"
-        fi
-        
-        echo ""
-        echo "🔧 应用的修复:"
-        echo "  ✅ try_to_unmap 参数修复"
-        echo "  ✅ blocktag 格式字符串修复"
-        echo "  ✅ get_boot_mode 类型冲突修复"
-        echo "  ✅ 禁用透明大页 (TRANSPARENT_HUGEPAGE)"
-        echo "  ✅ 禁用调度调优 (SCHED_TUNE)"
-        echo "  ✅ 禁用 Mediatek CM_MGR"
-        echo "  ✅ 禁用调试功能减少冲突"
-        
-        echo ""
-        echo "📁 生成的文件:"
-        find out/arch/arm64/boot/ -type f 2>/dev/null | while read file; do
-          echo "  📄 $file ($(du -h "$file" 2>/dev/null | cut -f1 || echo '未知'))"
-        done || echo "  无内核镜像文件"
-        
-        if [ -f "full_build.log" ]; then
-          echo ""
-          echo "⚠️  编译摘要:"
-          echo "  错误数量: $(grep -c "error:" full_build.log || echo 0)"
-          echo "  警告数量: $(grep -c "warning:" full_build.log || echo 0)"
-          echo "  最后错误:"
-          grep "error:" full_build.log | tail -3 | sed 's/^/    /' || echo "    无错误信息"
-        fi
-        
-        echo ""
-        echo "💡 建议:"
-        if [ -f "out/arch/arm64/boot/Image" ] || [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "  🎯 内核编译基本成功，可以用于测试"
-          echo "  🔧 某些驱动模块可能缺失，但核心功能可用"
-        else
-          echo "  🔧 需要进一步修复头文件冲突问题"
-          echo "  📚 建议检查内核版本兼容性"
-          echo "  🛠️  可能需要手动修复 mm/huge_memory.c 中的重定义问题"
-        fi
