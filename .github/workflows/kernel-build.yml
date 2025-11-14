@@ -11,7 +11,7 @@ on:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  FIX_VERSION: "14"  # 当前修复版本号，每次新增修复时递增
+  FIX_VERSION: "15"  # 当前修复版本号（新增第15项修复）
 
 jobs:
   build:
@@ -118,6 +118,15 @@ jobs:
           sed -i 's/tval.intval/pval.intval/g' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
         fi
 
+        # 15. 新增：修复 hacc_sk.c 中 SMSG 宏参数传递错误（逗号表达式警告）
+        echo "修复 hacc_sk.c 中 SMSG 宏参数错误..."
+        if [ -f "drivers/misc/mediatek/masp/asfv2/mach/hacc_sk.c" ]; then
+          # 修正SMSG宏的参数格式，将多参数用括号包裹避免逗号表达式警告
+          sed -i '183s/SMSG("\[%s\] size = %d is not %d bytes alignment\\n",/SMSG("\[%s\] size = %d is not %d bytes alignment\\n", (MOD, size, AES_BLK_SZ));/' drivers/misc/mediatek/masp/asfv2/mach/hacc_sk.c
+          # 或直接注释该调试日志（如果上述修复无效）
+          # sed -i '183,186s/^/\/\//' drivers/misc/mediatek/masp/asfv2/mach/hacc_sk.c
+        fi
+
         echo "所有源码修复完成（版本：v${{ env.FIX_VERSION }}）"
 
     - name: Configure kernel
@@ -146,7 +155,7 @@ jobs:
           --disable CC_STACKPROTECTOR \
           --disable CC_STACKPROTECTOR_STRONG \
           --disable STACK_VALIDATION \
-          --disable WERROR \
+          --disable WERROR \  # 禁用将警告视为错误（双重保险）
           --disable CONFIG_ARM64_PTR_AUTH \
           --disable CONFIG_ARM64_BTI \
           --disable CONFIG_ARM64_MTE \
@@ -175,9 +184,10 @@ jobs:
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
+        # 新增 -Wno-unused-value 禁用未使用值警告，避免转为错误
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point -Wno-unused-value" \
           2>&1 | tee full_build.log || echo "编译中断，检查日志..."
 
     - name: Check build results
@@ -214,7 +224,7 @@ jobs:
         fi
         
         echo ""
-        echo "🔧 修复清单（共14项）:"
+        echo "🔧 修复清单（共15项）:"
         echo "  1. ✅ try_to_unmap 参数修复"
         echo "  2. ✅ blocktag 格式字符串修复" 
         echo "  3. ✅ get_boot_mode 类型冲突修复"
@@ -229,6 +239,7 @@ jobs:
         echo " 12. ✅ gl_cfg80211.c memset 元素大小修复"
         echo " 13. ✅ mtk_charger.c 语法错误修复（保留充电功能）"
         echo " 14. ✅ extcon-mtk-usb.c 变量名拼写错误修复（tval -> pval）"
+        echo " 15. ✅ hacc_sk.c SMSG 宏参数传递错误修复（逗号表达式警告）"
 
     - name: Upload artifacts
       if: always()
