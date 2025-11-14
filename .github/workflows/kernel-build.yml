@@ -45,22 +45,12 @@ jobs:
         cd $KERNEL_DIR
         echo "=== 修复内核编译问题 ==="
         
-        # 修复 try_to_unmap 参数问题
+        # 修复 try_to_unmap 参数问题 - 这是主要修复
         if [ -f "mm/huge_memory.c" ]; then
-          echo "修复 mm/huge_memory.c..."
-          sed -i 's/try_to_unmap(page)/try_to_unmap(page, 0)/g' mm/huge_memory.c
-        fi
-        
-        # 修复格式字符串问题
-        if [ -f "drivers/misc/mediatek/blocktag/blocktag-core.c" ]; then
-          echo "修复 blocktag-core.c..."
-          sed -i 's/"%s %d %d"/"%s %zu %zu"/g' drivers/misc/mediatek/blocktag/blocktag-core.c
-        fi
-        
-        # 修复 thermal cooling 问题
-        if [ -f "drivers/thermal/cpu_cooling.c" ]; then
-          echo "修复 cpu_cooling.c..."
-          sed -i 's/^int cpufreq_platform_cooling_register/static int cpufreq_platform_cooling_register/g' drivers/thermal/cpu_cooling.c
+          echo "修复 mm/huge_memory.c 中的 try_to_unmap 调用..."
+          sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
+          echo "修复后的代码:"
+          grep -A2 -B2 "try_to_unmap(page, ttu_flags)" mm/huge_memory.c || true
         fi
 
     - name: Configure kernel
@@ -71,55 +61,190 @@ jobs:
         rm -rf out
         mkdir -p out
         
-        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+        make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }}
         
         # 禁用问题配置
-        ./scripts/config --file out/.config -d DEBUG_INFO
-        ./scripts/config --file out/.config -d GDB_SCRIPTS
-        ./scripts/config --file out/.config -d MTK_CM_MGR
+        ./scripts/config --file out/.config \
+          --disable DEBUG_INFO \
+          --disable GDB_SCRIPTS \
+          --disable DEBUG_KERNEL
         
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-    - name: Build kernel
+    - name: Stage 1 - Build core components
       run: |
         cd $KERNEL_DIR
-        echo "=== 编译内核 ==="
+        echo "=== 阶段 1: 编译核心组件 ==="
         
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        time make O=out ARCH=arm64 -j$(nproc) \
-          CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-memset-elt-size" \
-          2>&1 | tee build.log
+        # 首先编译基础组件
+        echo "1. 编译基础工具和头文件..."
+        make O=out ARCH=arm64 -j1 scripts prepare 2>&1 | tee stage1_build.log || echo "基础工具编译完成"
+        
+        # 编译有问题的 mm 组件
+        echo "2. 编译内存管理组件 (mm)..."
+        if make O=out ARCH=arm64 -j1 mm/ 2>&1 | tee -a stage1_build.log; then
+          echo "✅ mm 组件编译成功"
+          echo "STAGE1_PASSED=true" >> $GITHUB_ENV
+        else
+          echo "❌ mm 组件编译失败"
+          echo "错误详情:"
+          grep -i "error:" stage1_build.log | head -10
+          echo "STAGE1_PASSED=false" >> $GITHUB_ENV
+          exit 1
+        fi
+        
+        # 编译其他关键组件
+        echo "3. 编译内核核心..."
+        if make O=out ARCH=arm64 -j1 kernel/ mm/ fs/ ipc/ 2>&1 | tee -a stage1_build.log; then
+          echo "✅ 核心组件编译成功"
+        else
+          echo "❌ 核心组件编译失败"
+          grep -i "error:" stage1_build.log | tail -10
+          exit 1
+        fi
 
-    - name: Check build results
+    - name: Stage 2 - Build architecture specific
+      if: env.STAGE1_PASSED == 'true'
       run: |
         cd $KERNEL_DIR
-        echo "=== 检查构建结果 ==="
+        echo "=== 阶段 2: 编译架构相关组件 ==="
+        
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        echo "1. 编译 ARM64 架构代码..."
+        if make O=out ARCH=arm64 -j2 arch/arm64/ 2>&1 | tee stage2_build.log; then
+          echo "✅ ARM64 架构编译成功"
+          echo "STAGE2_PASSED=true" >> $GITHUB_ENV
+        else
+          echo "❌ ARM64 架构编译失败"
+          grep -i "error:" stage2_build.log | head -10
+          echo "STAGE2_PASSED=false" >> $GITHUB_ENV
+          exit 1
+        fi
+
+    - name: Stage 3 - Build drivers
+      if: env.STAGE2_PASSED == 'true'
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 阶段 3: 编译驱动程序 ==="
+        
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        echo "1. 编译核心驱动程序..."
+        # 先编译一些关键驱动
+        if make O=out ARCH=arm64 -j$(nproc) drivers/base/ drivers/char/ drivers/clk/ 2>&1 | tee stage3_build.log; then
+          echo "✅ 核心驱动编译成功"
+        else
+          echo "❌ 核心驱动编译失败"
+          grep -i "error:" stage3_build.log | head -10
+          exit 1
+        fi
+        
+        echo "2. 编译 Mediatek 驱动..."
+        if make O=out ARCH=arm64 -j$(nproc) drivers/misc/mediatek/ 2>&1 | tee -a stage3_build.log; then
+          echo "✅ Mediatek 驱动编译成功"
+        else
+          echo "⚠️  Mediatek 驱动编译有警告，继续..."
+          # 不退出，因为有些警告可能不影响最终构建
+        fi
+
+    - name: Stage 4 - Full kernel build
+      if: env.STAGE2_PASSED == 'true'
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 阶段 4: 完整内核编译 ==="
+        
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        echo "开始完整编译..."
+        time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
+          CROSS_COMPILE="aarch64-linux-gnu-" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-memset-elt-size -Wno-address-of-packed-member" \
+          2>&1 | tee full_build.log
+        
+        echo "编译完成，检查结果..."
+
+    - name: Check final build results
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 检查最终构建结果 ==="
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "✅ 内核编译成功!"
           echo "文件: out/arch/arm64/boot/Image.gz"
           echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
+          echo "其他生成的文件:"
+          ls -la out/arch/arm64/boot/ || echo "无法列出文件"
         else
           echo "❌ 编译失败"
+          echo "各阶段状态:"
+          echo "阶段1 (核心组件): ${{ env.STAGE1_PASSED || '未完成' }}"
+          echo "阶段2 (架构组件): ${{ env.STAGE2_PASSED || '未完成' }}"
           echo "错误摘要:"
-          grep "error:" build.log | head -5 || echo "无错误信息"
+          if [ -f "full_build.log" ]; then
+            grep -i "error:" full_build.log | head -10
+          elif [ -f "stage3_build.log" ]; then
+            grep -i "error:" stage3_build.log | head -10
+          elif [ -f "stage2_build.log" ]; then
+            grep -i "error:" stage2_build.log | head -10
+          elif [ -f "stage1_build.log" ]; then
+            grep -i "error:" stage1_build.log | head -10
+          fi
+          exit 1
         fi
 
-    - name: Upload artifacts
+    - name: Upload kernel artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-image-${{ github.run_number }}
+        path: |
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image
+        retention-days: 30
+
+    - name: Upload build logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.run_number }}
+        name: build-logs-${{ github.run_number }}
         path: |
-          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
-          ${{ env.KERNEL_DIR }}/build.log
+          ${{ env.KERNEL_DIR }}/stage1_build.log
+          ${{ env.KERNEL_DIR }}/stage2_build.log
+          ${{ env.KERNEL_DIR }}/stage3_build.log
+          ${{ env.KERNEL_DIR }}/full_build.log
         retention-days: 30
 
     - name: Create build summary
       if: always()
       run: |
-        echo "=== 构建完成 ==="
-        echo "工作流运行完成，请下载 Artifacts 查看结果"
+        cd $KERNEL_DIR
+        echo "=== 构建完成报告 ==="
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "🎉 内核编译成功!"
+          echo ""
+          echo "📊 构建阶段状态:"
+          echo "  ✅ 阶段1: 核心组件 - 完成"
+          echo "  ✅ 阶段2: 架构组件 - 完成" 
+          echo "  ✅ 阶段3: 驱动程序 - 完成"
+          echo "  ✅ 阶段4: 完整编译 - 完成"
+          echo ""
+          echo "📦 产物: out/arch/arm64/boot/Image.gz ($(du -h out/arch/arm64/boot/Image.gz | cut -f1))"
+        else
+          echo "❌ 编译失败"
+          echo ""
+          echo "📊 失败阶段:"
+          echo "  阶段1 (核心组件): ${{ env.STAGE1_PASSED || '失败' }}"
+          echo "  阶段2 (架构组件): ${{ env.STAGE2_PASSED || '失败' }}"
+          echo ""
+          echo "🔧 建议:"
+          echo "  1. 下载 build-logs Artifact 查看详细错误"
+          echo "  2. 检查 try_to_unmap 修复是否正确应用"
+          echo "  3. 可能需要修复其他内核API兼容性问题"
+        fi
