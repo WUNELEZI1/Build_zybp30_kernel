@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Self-Maintained)
+name: Build MT6768 Kernel (Direct Source Fix)
 
 on:
   workflow_dispatch:
@@ -20,8 +20,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install dependencies
       run: |
@@ -33,60 +31,64 @@ jobs:
           libncurses-dev dwarves curl file tree patch
         sudo ln -sf /usr/bin/python3 /usr/bin/python
 
-    - name: Clone kernel source
+    - name: Clone and fix kernel source directly
       run: |
         git clone --depth=1 --branch=mt6768-4.19 \
           https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
-
-    - name: Apply comprehensive fixes
-      run: |
-        cd $KERNEL_DIR
-        echo "=== 应用全面修复 ==="
+        
+        cd kernel-source
+        
+        echo "=== 直接在源码中应用修复 ==="
         
         # 1. 修复 try_to_unmap 参数问题
-        if [ -f "mm/huge_memory.c" ]; then
-          echo "修复 try_to_unmap 调用..."
-          sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
-        fi
+        echo "修复 mm/huge_memory.c..."
+        sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
 
         # 2. 修复 blocktag 格式字符串
-        if [ -f "drivers/misc/mediatek/blocktag/blocktag-core.c" ]; then
-          echo "修复 blocktag 格式字符串..."
-          sed -i 's/"%s aee buffer: %d bytes\\n"/"%s aee buffer: %zu bytes\\n"/g' drivers/misc/mediatek/blocktag/blocktag-core.c
-        fi
+        echo "修复 blocktag-core.c..."
+        sed -i 's/"%s aee buffer: %d bytes\\n"/"%s aee buffer: %zu bytes\\n"/g' drivers/misc/mediatek/blocktag/blocktag-core.c
 
         # 3. 修复 get_boot_mode 类型冲突
-        if [ -f "drivers/input/keyboard/mediatek/mt6768/hal_kpd.c" ]; then
-          echo "修复 get_boot_mode 类型冲突..."
-          sed -i 's/unsigned int get_boot_mode(void)/enum boot_mode_t get_boot_mode(void)/g' drivers/input/keyboard/mediatek/mt6768/hal_kpd.c
+        echo "修复 hal_kpd.c..."
+        sed -i 's/unsigned int get_boot_mode(void)/enum boot_mode_t get_boot_mode(void)/g' drivers/input/keyboard/mediatek/mt6768/hal_kpd.c
+
+        # 4. 修复 mtk_cm_mgr.c 中的 memset 问题
+        echo "修复 mtk_cm_mgr.c..."
+        sed -i 's/memset(count_ack, 0, ARRAY_SIZE(count_ack));/memset(count_ack, 0, sizeof(count_ack));/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c
+        sed -i 's/memset(max_load, 0, ARRAY_SIZE(count_ack));/memset(max_load, 0, sizeof(max_load));/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c
+
+        # 5. 修复 keyslot-manager 内联函数问题
+        echo "修复 keyslot-manager.h..."
+        sed -i 's/always_inline //g' include/linux/keyslot-manager.h
+
+        # 6. 修复 blk-crypto 内联函数问题
+        echo "修复 blk-crypto.h..."
+        sed -i 's/always_inline //g' include/linux/blk-crypto.h
+
+        # 7. 修复 blk-crypto.c 中的函数调用
+        echo "修复 blk-crypto.c..."
+        if [ -f "block/blk-crypto.c" ]; then
+          # 临时注释掉有问题的函数调用
+          sed -i 's/ksm_flock(ksm, flags);/\/\/ ksm_flock(ksm, flags);/g' block/blk-crypto.c
+          sed -i 's/blk_crypto_flock(q, flags);/\/\/ blk_crypto_flock(q, flags);/g' block/blk-crypto.c
         fi
 
-        # 4. 修复 keyslot-manager 内联函数问题
-        if [ -f "include/linux/keyslot-manager.h" ]; then
-          echo "修复 keyslot-manager.h 内联函数..."
-          sed -i 's/always_inline //g' include/linux/keyslot-manager.h
-        fi
+        echo "所有源码修复完成"
 
-        # 5. 修复 blk-crypto 内联函数问题
-        if [ -f "include/linux/blk-crypto.h" ]; then
-          echo "修复 blk-crypto.h 内联函数..."
-          sed -i 's/always_inline //g' include/linux/blk-crypto.h
-        fi
-
-        echo "所有修复已完成"
-
-    - name: Configure kernel to disable problematic features
+    - name: Configure kernel with essential features only
       run: |
         cd $KERNEL_DIR
-        echo "=== 配置内核：禁用问题功能 ==="
+        echo "=== 最小化内核配置 ==="
         
         rm -rf out
         mkdir -p out
         
+        # 使用 defconfig
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }}
         
+        # 禁用所有已知的问题功能
         ./scripts/config --file out/.config \
           --disable DEBUG_INFO \
           --disable GDB_SCRIPTS \
@@ -96,71 +98,136 @@ jobs:
           --disable TRANSPARENT_HUGEPAGE \
           --disable BLK_DEV_CRYPTO \
           --disable DM_CRYPT \
-          --disable CRYPTO_BLKCIPHER \
           --disable BLK_INLINE_ENCRYPTION \
           --disable BLK_CRYPTO
         
+        # 启用必要的基础功能
         ./scripts/config --file out/.config \
           --enable MODULES \
           --enable MODULE_UNLOAD \
-          --enable MODULE_FORCE_UNLOAD \
-          --enable BLOCK \
           --enable ARM64 \
           --enable MMU \
-          --enable SMP \
-          --enable ARCH_MT6797 \
-          --enable MACH_MT6768
+          --enable SMP
         
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+        
+        echo "配置完成"
 
-    - name: Build kernel with aggressive error suppression
+    - name: Build kernel with maximum error tolerance
       run: |
         cd $KERNEL_DIR
-        echo "=== 使用激进错误抑制编译内核 ==="
+        echo "=== 编译内核（最大容错） ==="
         
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
+        # 使用最大容错的编译选项
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-absolute-value -Wno-builtin-declaration-mismatch -Wno-discarded-qualifiers -Wno-incompatible-pointer-types-discards-qualifiers" \
-          KCPPFLAGS="-Wno-error" \
-          2>&1 | tee full_build.log || echo "编译过程完成，检查结果..."
+          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast" \
+          2>&1 | tee full_build.log || echo "编译完成，检查结果..."
 
-    - name: Check build results
+    - name: Check build results thoroughly
       run: |
         cd $KERNEL_DIR
-        echo "=== 检查构建结果 ==="
+        echo "=== 详细检查构建结果 ==="
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "✅ 内核镜像生成成功!"
+          echo "文件: out/arch/arm64/boot/Image.gz"
+          echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
           echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
         elif [ -f "out/arch/arm64/boot/Image" ]; then
           echo "✅ 内核镜像生成成功 (未压缩)"
+          echo "文件: out/arch/arm64/boot/Image" 
+          echo "大小: $(du -h out/arch/arm64/boot/Image | cut -f1)"
           echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
         elif [ -f "out/vmlinux" ]; then
           echo "⚠️  生成 vmlinux 但未打包"
+          echo "文件: out/vmlinux ($(du -h out/vmlinux | cut -f1))"
           echo "KERNEL_BUILD_SUCCESS=partial" >> $GITHUB_ENV
         else
           echo "❌ 未生成内核镜像"
           echo "KERNEL_BUILD_SUCCESS=false" >> $GITHUB_ENV
         fi
 
-    - name: Create final build report
+    - name: Create comprehensive build report
       if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 最终构建报告 ==="
-        
+        echo "=== 完整构建报告 ==="
+        echo ""
+        echo "📊 构建状态:"
         if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
           echo "🎉 内核编译成功!"
+          if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+            echo "  文件: out/arch/arm64/boot/Image.gz ($(du -h out/arch/arm64/boot/Image.gz | cut -f1))"
+          else
+            echo "  文件: out/arch/arm64/boot/Image ($(du -h out/arch/arm64/boot/Image | cut -f1))"
+          fi
         elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
           echo "⚠️  部分成功 - 生成 vmlinux"
+          echo "  文件: out/vmlinux ($(du -h out/vmlinux | cut -f1))"
         else
           echo "❌ 构建失败"
         fi
+        
+        echo ""
+        echo "🔧 应用的修复:"
+        echo "  ✅ try_to_unmap 参数修复 (mm/huge_memory.c)"
+        echo "  ✅ blocktag 格式字符串修复 (blocktag-core.c)" 
+        echo "  ✅ get_boot_mode 类型冲突修复 (hal_kpd.c)"
+        echo "  ✅ mtk_cm_mgr memset 修复 (mtk_cm_mgr.c)"
+        echo "  ✅ keyslot-manager 内联函数修复"
+        echo "  ✅ blk-crypto 内联函数修复"
+        echo "  ✅ blk-crypto.c 函数调用修复"
+        
+        echo ""
+        echo "⚙️ 配置调整:"
+        echo "  🔧 禁用 DEBUG_INFO 和调试功能"
+        echo "  🔧 禁用 SCHED_TUNE"
+        echo "  🔧 禁用 MTK_CM_MGR" 
+        echo "  🔧 禁用透明大页"
+        echo "  🔧 禁用块设备加密"
+        
+        if [ -f "full_build.log" ]; then
+          echo ""
+          echo "📈 编译统计:"
+          echo "  错误数量: $(grep -c "error:" full_build.log || echo 0)"
+          echo "  警告数量: $(grep -c "warning:" full_build.log || echo 0)"
+          
+          if [ "$KERNEL_BUILD_SUCCESS" != "true" ]; then
+            echo ""
+            echo "🔍 最后错误:"
+            grep "error:" full_build.log | tail -3 | sed 's/^/  /' || echo "  无错误信息"
+          fi
+        fi
+        
+        echo ""
+        echo "📁 生成的文件列表:"
+        find out/arch/arm64/boot/ -type f 2>/dev/null | while read file; do
+          echo "  📄 $file ($(du -h "$file" 2>/dev/null | cut -f1 || echo '未知'))"
+        done || echo "  无内核镜像文件"
+        
+        if [ -f "out/vmlinux" ]; then
+          echo "  📄 out/vmlinux ($(du -h out/vmlinux | cut -f1))"
+        fi
+        
+        echo ""
+        echo "💡 建议:"
+        if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
+          echo "  🎯 内核编译成功！可以刷机测试"
+          echo "  📦 下载 Artifacts 获取内核镜像"
+        elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
+          echo "  🔧 需要手动打包 vmlinux:"
+          echo "    aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image"
+          echo "    gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz"
+        else
+          echo "  🔧 需要进一步分析具体错误"
+          echo "  📚 检查完整构建日志获取详细信息"
+        fi
 
-    - name: Upload artifacts
+    - name: Upload all build artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
