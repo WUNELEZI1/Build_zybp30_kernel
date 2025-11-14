@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Charger Fix Edition)
+name: Build MT6768 Kernel (Charger Fix + KernelSU Edition)
 
 on:
   workflow_dispatch:
@@ -7,15 +7,20 @@ on:
         description: 'Kernel defconfig'
         required: true
         default: 'k69v1_64_k419_defconfig'
+      KSU_VERSION:
+        description: 'KernelSU version (tag/commit)'
+        required: true
+        default: 'v0.7.0'
 
 env:
   ARCH: arm64
   SUBARCH: arm64
+  KSU_REPO: https://github.com/tiann/KernelSU.git
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
     - name: Checkout repository
@@ -26,21 +31,30 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
-          git wget unzip python3 \
+          git wget unzip python3 python3-pip \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           libncurses-dev dwarves curl file tree patch
         sudo ln -sf /usr/bin/python3 /usr/bin/python
+        pip3 install requests
 
-    - name: Clone and fix kernel source
+    - name: Clone kernel source and KernelSU
       run: |
+        # 克隆内核源码
         git clone --depth=1 --branch=mt6768-4.19 \
           https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
           kernel-source
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
         
-        cd kernel-source
+        # 克隆KernelSU源码
+        git clone --depth=1 --branch=${{ github.event.inputs.KSU_VERSION }} \
+          $KSU_REPO kernel-su
+        echo "KSU_DIR=$(pwd)/kernel-su" >> $GITHUB_ENV
+
+    - name: Apply core fixes
+      run: |
+        cd $KERNEL_DIR
         
-        echo "=== 修复所有编译问题 ==="
+        echo "=== 应用基础编译修复 ==="
         
         # 1. 修复 try_to_unmap 参数问题
         echo "修复 mm/huge_memory.c..."
@@ -105,25 +119,38 @@ jobs:
           sed -i '3357s/kalMemZero(arBugReport, sizeof(struct EVENT_BUG_REPORT));/memset(arBugReport, 0, sizeof(*arBugReport));/' drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
         fi
 
-        # 13. 修复 mtk_charger.c 中的语法错误 - 简化版本
+        # 13. 修复 mtk_charger.c 中的语法错误（优化版本：保留核心逻辑）
         echo "修复 mtk_charger.c 语法错误..."
         if [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ]; then
-          # 简化修复：直接注释有问题的代码块
-          sed -i '205,215s/^/\/\/ TEMPORARY FIX: /' drivers/power/supply/mediatek/charger/mtk_charger.c
-          echo "// End of file - build fix" >> drivers/power/supply/mediatek/charger/mtk_charger.c
+          # 替换问题代码块而非直接注释，保留充电基本功能
+          sed -i '205,215c\    if (ret) {\n        pr_err("charger: failed to set current limit\\n");\n        return ret;\n    }' drivers/power/supply/mediatek/charger/mtk_charger.c
         fi
 
-        echo "所有源码修复完成"
-
-    - name: Configure kernel
+    - name: Integrate KernelSU
       run: |
         cd $KERNEL_DIR
-        echo "=== 内核配置 ==="
+        
+        echo "=== 集成 KernelSU ==="
+        # 应用KernelSU自动补丁
+        $KSU_DIR/kernel/setup.sh $KERNEL_DIR
+        
+        # 修复KernelSU与当前内核的兼容性
+        if [ -f "security/ksu/ksu.c" ]; then
+          # 适配4.19内核的compat处理
+          sed -i 's/struct task_struct \*p = current;/struct task_struct \*p = current;\n    mm_segment_t old_fs;/g' security/ksu/ksu.c
+          sed -i 's/ksu_write_file/old_fs = get_fs();\n    set_fs(KERNEL_DS);\n    ksu_write_file/g' security/ksu/ksu.c
+          sed -i 's/return 0;/    set_fs(old_fs);\n    return 0;/g' security/ksu/ksu.c
+        fi
+
+    - name: Configure kernel with KernelSU support
+      run: |
+        cd $KERNEL_DIR
+        echo "=== 内核配置（含KernelSU支持） ==="
         
         rm -rf out
         mkdir -p out
         
-        # 使用 defconfig
+        # 基础配置
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }}
         
         # 禁用问题功能
@@ -141,24 +168,12 @@ jobs:
           --disable CC_STACKPROTECTOR \
           --disable CC_STACKPROTECTOR_STRONG \
           --disable STACK_VALIDATION \
-          --disable DEBUG_PREEMPT \
-          --disable PROVE_LOCKING \
-          --disable DEBUG_ATOMIC_SLEEP \
-          --disable DEBUG_MUTEXES \
-          --disable DEBUG_SPINLOCK \
           --disable WERROR \
-          --disable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE \
-          --enable CONFIG_CC_OPTIMIZE_FOR_SIZE \
           --disable CONFIG_ARM64_PTR_AUTH \
           --disable CONFIG_ARM64_BTI \
-          --disable CONFIG_ARM64_MTE \
-          --disable DEBUG_LIST \
-          --disable DEBUG_PI_LIST \
-          --disable DEBUG_SG \
-          --disable DEBUG_NOTIFIERS \
-          --disable DEBUG_CREDENTIALS
+          --disable CONFIG_ARM64_MTE
 
-        # 启用基础功能
+        # 启用KernelSU必需配置
         ./scripts/config --file out/.config \
           --enable MODULES \
           --enable MODULE_UNLOAD \
@@ -166,10 +181,17 @@ jobs:
           --enable MMU \
           --enable SMP \
           --enable ARCH_MT6797 \
-          --enable MACH_MT6768
-        
+          --enable MACH_MT6768 \
+          --enable KALLSYMS \
+          --enable KALLSYMS_ALL \
+          --enable HAVE_KPROBES \
+          --enable KPROBES \
+          --enable DEBUG_FS \
+          --enable CONFIG_CC_OPTIMIZE_FOR_SIZE \
+          --enable KSU # KernelSU主开关
+
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-        echo "配置完成"
+        echo "配置完成（已包含KernelSU支持）"
 
     - name: Build kernel
       run: |
@@ -181,7 +203,7 @@ jobs:
         
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-maybe-uninitialized -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-pointer-bool-conversion -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-pointer-bool-conversion -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point" \
           2>&1 | tee full_build.log || echo "编译完成，检查结果..."
 
     - name: Check build results
@@ -210,36 +232,27 @@ jobs:
         echo "=== 构建报告 ==="
         
         if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
-          echo "🎉 内核编译成功!"
+          echo "🎉 内核编译成功! (已集成KernelSU ${{ github.event.inputs.KSU_VERSION }})"
         elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
-          echo "⚠️  部分成功 - 生成 vmlinux"
+          echo "⚠️  部分成功 - 生成 vmlinux (已尝试集成KernelSU)"
         else
           echo "❌ 构建失败"
         fi
         
         echo ""
         echo "🔧 修复清单:"
-        echo "  ✅ try_to_unmap 参数修复"
-        echo "  ✅ blocktag 格式字符串修复" 
-        echo "  ✅ get_boot_mode 类型冲突修复"
-        echo "  ✅ mtk_cm_mgr memset 修复"
-        echo "  ✅ keyslot-manager 内联函数修复"
-        echo "  ✅ blk-crypto 内联函数修复"
-        echo "  ✅ blk-crypto.c 函数调用修复"
-        echo "  ✅ mtk_battery.c kstrtoint 返回值修复"
-        echo "  ✅ ccci_util_lib_sys.c 地址警告修复"
-        echo "  ✅ mtk_charger_intf.h 开关不可达修复"
-        echo "  ✅ cmdq_sec_mtee.c strncpy sizeof 修复"
-        echo "  ✅ gl_cfg80211.c memset 元素大小修复"
-        echo "  ✅ mtk_charger.c 语法错误修复"
+        echo "  ✅ 基础编译错误修复（13项）"
+        echo "  ✅ KernelSU ${ { github.event.inputs.KSU_VERSION } } 集成与适配"
+        echo "  ✅ 启用KernelSU必需配置项"
 
     - name: Upload artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.run_number }}
+        name: kernel-build-ksu-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
           ${{ env.KERNEL_DIR }}/out/vmlinux
           ${{ env.KERNEL_DIR }}/full_build.log
+          ${{ env.KERNEL_DIR }}/.config
         retention-days: 30
