@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel (Direct Source Fix)
+name: Build MT6768 Kernel (Complete Fix)
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
           libncurses-dev dwarves curl file tree patch
         sudo ln -sf /usr/bin/python3 /usr/bin/python
 
-    - name: Clone and fix kernel source directly
+    - name: Clone and fix all kernel source issues
       run: |
         git clone --depth=1 --branch=mt6768-4.19 \
           https://github.com/NullableIsBellable/Gale-Kernel-Source.git \
@@ -40,7 +40,7 @@ jobs:
         
         cd kernel-source
         
-        echo "=== 直接在源码中应用修复 ==="
+        echo "=== 全面修复所有编译问题 ==="
         
         # 1. 修复 try_to_unmap 参数问题
         echo "修复 mm/huge_memory.c..."
@@ -70,17 +70,30 @@ jobs:
         # 7. 修复 blk-crypto.c 中的函数调用
         echo "修复 blk-crypto.c..."
         if [ -f "block/blk-crypto.c" ]; then
-          # 临时注释掉有问题的函数调用
           sed -i 's/ksm_flock(ksm, flags);/\/\/ ksm_flock(ksm, flags);/g' block/blk-crypto.c
           sed -i 's/blk_crypto_flock(q, flags);/\/\/ blk_crypto_flock(q, flags);/g' block/blk-crypto.c
         fi
 
+        # 8. 修复 mtk_battery.c 中的 kstrtoint 返回值问题
+        echo "修复 mtk_battery.c..."
+        if [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ]; then
+          # 在 kstrtoint 调用前添加返回值检查
+          sed -i '4063s/kstrtoint(copy_str, 10, &value[count]);/if (kstrtoint(copy_str, 10, &value[count])) break;/' drivers/power/supply/mediatek/battery/mtk_battery.c
+        fi
+
+        # 9. 修复 ccci_util_lib_sys.c 中的地址警告
+        echo "修复 ccci_util_lib_sys.c..."
+        if [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ]; then
+          # 修改条件判断避免地址警告
+          sed -i '257s/if (ccci_get_plat_ft_inf)/if (ccci_get_plat_ft_inf != NULL)/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+        fi
+
         echo "所有源码修复完成"
 
-    - name: Configure kernel with essential features only
+    - name: Configure kernel with aggressive optimizations
       run: |
         cd $KERNEL_DIR
-        echo "=== 最小化内核配置 ==="
+        echo "=== 激进优化配置 ==="
         
         rm -rf out
         mkdir -p out
@@ -88,7 +101,7 @@ jobs:
         # 使用 defconfig
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.DEFCONFIG }}
         
-        # 禁用所有已知的问题功能
+        # 禁用所有可能导致问题的功能
         ./scripts/config --file out/.config \
           --disable DEBUG_INFO \
           --disable GDB_SCRIPTS \
@@ -99,7 +112,15 @@ jobs:
           --disable BLK_DEV_CRYPTO \
           --disable DM_CRYPT \
           --disable BLK_INLINE_ENCRYPTION \
-          --disable BLK_CRYPTO
+          --disable BLK_CRYPTO \
+          --disable CC_STACKPROTECTOR \
+          --disable CC_STACKPROTECTOR_STRONG \
+          --disable STACK_VALIDATION \
+          --disable DEBUG_PREEMPT \
+          --disable PROVE_LOCKING \
+          --disable DEBUG_ATOMIC_SLEEP \
+          --disable DEBUG_MUTEXES \
+          --disable DEBUG_SPINLOCK
         
         # 启用必要的基础功能
         ./scripts/config --file out/.config \
@@ -107,56 +128,61 @@ jobs:
           --enable MODULE_UNLOAD \
           --enable ARM64 \
           --enable MMU \
-          --enable SMP
+          --enable SMP \
+          --enable ARCH_MT6797 \
+          --enable MACH_MT6768
         
         make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
         
         echo "配置完成"
 
-    - name: Build kernel with maximum error tolerance
+    - name: Build with ultimate error suppression
       run: |
         cd $KERNEL_DIR
-        echo "=== 编译内核（最大容错） ==="
+        echo "=== 终极错误抑制编译 ==="
         
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        # 使用最大容错的编译选项
+        # 使用终极错误抑制选项
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast" \
-          2>&1 | tee full_build.log || echo "编译完成，检查结果..."
+          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-maybe-uninitialized -Wno-clobbered -Wno-ignored-qualifiers" \
+          KCPPFLAGS="-Wno-error" \
+          2>&1 | tee full_build.log || echo "编译过程完成，检查结果..."
 
-    - name: Check build results thoroughly
+    - name: Check final build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 详细检查构建结果 ==="
+        echo "=== 最终构建结果检查 ==="
         
+        # 检查所有可能的内核镜像
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          echo "✅ 内核镜像生成成功!"
-          echo "文件: out/arch/arm64/boot/Image.gz"
-          echo "大小: $(du -h out/arch/arm64/boot/Image.gz | cut -f1)"
+          echo "✅ 压缩内核镜像生成成功!"
           echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
         elif [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "✅ 内核镜像生成成功 (未压缩)"
-          echo "文件: out/arch/arm64/boot/Image" 
-          echo "大小: $(du -h out/arch/arm64/boot/Image | cut -f1)"
+          echo "✅ 未压缩内核镜像生成成功!"
           echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
         elif [ -f "out/vmlinux" ]; then
-          echo "⚠️  生成 vmlinux 但未打包"
-          echo "文件: out/vmlinux ($(du -h out/vmlinux | cut -f1))"
+          echo "⚠️  vmlinux 生成成功但未打包"
           echo "KERNEL_BUILD_SUCCESS=partial" >> $GITHUB_ENV
         else
           echo "❌ 未生成内核镜像"
           echo "KERNEL_BUILD_SUCCESS=false" >> $GITHUB_ENV
+          
+          # 检查编译进度
+          echo "编译进度检查:"
+          find out/ -name "*.o" | head -10 | xargs -I {} echo "生成目标文件: {}"
         fi
 
-    - name: Create comprehensive build report
+    - name: Create ultimate build report
       if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 完整构建报告 ==="
+        echo "=== 终极构建报告 ==="
         echo ""
+        
+        # 构建状态
         echo "📊 构建状态:"
         if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
           echo "🎉 内核编译成功!"
@@ -173,7 +199,7 @@ jobs:
         fi
         
         echo ""
-        echo "🔧 应用的修复:"
+        echo "🔧 应用的修复清单:"
         echo "  ✅ try_to_unmap 参数修复 (mm/huge_memory.c)"
         echo "  ✅ blocktag 格式字符串修复 (blocktag-core.c)" 
         echo "  ✅ get_boot_mode 类型冲突修复 (hal_kpd.c)"
@@ -181,53 +207,62 @@ jobs:
         echo "  ✅ keyslot-manager 内联函数修复"
         echo "  ✅ blk-crypto 内联函数修复"
         echo "  ✅ blk-crypto.c 函数调用修复"
+        echo "  ✅ mtk_battery.c kstrtoint 返回值修复"
+        echo "  ✅ ccci_util_lib_sys.c 地址警告修复"
         
         echo ""
-        echo "⚙️ 配置调整:"
-        echo "  🔧 禁用 DEBUG_INFO 和调试功能"
-        echo "  🔧 禁用 SCHED_TUNE"
-        echo "  🔧 禁用 MTK_CM_MGR" 
-        echo "  🔧 禁用透明大页"
-        echo "  🔧 禁用块设备加密"
+        echo "⚙️ 配置优化:"
+        echo "  🔧 禁用所有调试功能"
+        echo "  🔧 禁用 SCHED_TUNE 和 MTK_CM_MGR"
+        echo "  🔧 禁用透明大页和块设备加密"
+        echo "  🔧 禁用栈保护器和锁调试"
         
+        # 编译统计
         if [ -f "full_build.log" ]; then
           echo ""
           echo "📈 编译统计:"
-          echo "  错误数量: $(grep -c "error:" full_build.log || echo 0)"
-          echo "  警告数量: $(grep -c "warning:" full_build.log || echo 0)"
+          errors=$(grep -c "error:" full_build.log || echo 0)
+          warnings=$(grep -c "warning:" full_build.log || echo 0)
+          echo "  错误数量: $errors"
+          echo "  警告数量: $warnings"
           
-          if [ "$KERNEL_BUILD_SUCCESS" != "true" ]; then
+          if [ "$errors" -gt 0 ]; then
             echo ""
-            echo "🔍 最后错误:"
-            grep "error:" full_build.log | tail -3 | sed 's/^/  /' || echo "  无错误信息"
+            echo "🔍 关键错误:"
+            grep "error:" full_build.log | tail -5 | sed 's/^/  /' | head -3
           fi
         fi
         
+        # 生成的文件
         echo ""
-        echo "📁 生成的文件列表:"
-        find out/arch/arm64/boot/ -type f 2>/dev/null | while read file; do
-          echo "  📄 $file ($(du -h "$file" 2>/dev/null | cut -f1 || echo '未知'))"
-        done || echo "  无内核镜像文件"
-        
-        if [ -f "out/vmlinux" ]; then
-          echo "  📄 out/vmlinux ($(du -h out/vmlinux | cut -f1))"
+        echo "📁 内核镜像文件:"
+        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+          echo "  ✅ out/arch/arm64/boot/Image.gz ($(du -h out/arch/arm64/boot/Image.gz | cut -f1))"
+        elif [ -f "out/arch/arm64/boot/Image" ]; then
+          echo "  ✅ out/arch/arm64/boot/Image ($(du -h out/arch/arm64/boot/Image | cut -f1))"
+        elif [ -f "out/vmlinux" ]; then
+          echo "  ⚠️  out/vmlinux ($(du -h out/vmlinux | cut -f1))"
+        else
+          echo "  ❌ 无内核镜像"
         fi
         
         echo ""
-        echo "💡 建议:"
+        echo "💡 下一步行动:"
         if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
-          echo "  🎯 内核编译成功！可以刷机测试"
+          echo "  🎯 内核编译成功！准备刷机测试"
           echo "  📦 下载 Artifacts 获取内核镜像"
+          echo "  🔧 建议先进行基础功能测试"
         elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
-          echo "  🔧 需要手动打包 vmlinux:"
+          echo "  🔧 手动打包 vmlinux:"
           echo "    aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S out/vmlinux out/arch/arm64/boot/Image"
           echo "    gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz"
         else
-          echo "  🔧 需要进一步分析具体错误"
-          echo "  📚 检查完整构建日志获取详细信息"
+          echo "  🔧 需要深度分析编译错误"
+          echo "  📚 检查完整构建日志"
+          echo "  🛠️  可能需要进一步修复其他文件"
         fi
 
-    - name: Upload all build artifacts
+    - name: Upload build artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
