@@ -11,6 +11,7 @@ on:
 env:
   ARCH: arm64
   SUBARCH: arm64
+  FIX_VERSION: "14"  # 当前修复版本号，每次新增修复时递增
 
 jobs:
   build:
@@ -40,7 +41,7 @@ jobs:
         
         cd kernel-source
         
-        echo "=== 应用基础编译修复 ==="
+        echo "=== 应用基础编译修复（版本：v${{ env.FIX_VERSION }}） ==="
         
         # 1. 修复 try_to_unmap 参数问题
         echo "修复 mm/huge_memory.c..."
@@ -92,10 +93,9 @@ jobs:
           sed -i '48s/return -EINVAL;/\/\/ return -EINVAL;/' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
         fi
 
-        # 11. 修复 cmdq_sec_mtee.c 中的字符串终止符错误（关键修复：字符常量而非字符串）
+        # 11. 修复 cmdq_sec_mtee.c 中的字符串终止符错误
         echo "修复 cmdq_sec_mtee.c..."
         if [ -f "drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c" ]; then
-          # 修正字符串终止符赋值：使用'\0'（字符常量）而非"\0"（字符串）
           sed -i '19s/strncpy(tee->ta_uuid, ta_uuid, sizeof(ta_uuid));/strncpy(tee->ta_uuid, ta_uuid, sizeof(tee->ta_uuid) - 1); tee->ta_uuid[sizeof(tee->ta_uuid) - 1] = '\''\\0'\'';/' drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c
           sed -i '20s/strncpy(tee->wsm_uuid, wsm_uuid, sizeof(wsm_uuid));/strncpy(tee->wsm_uuid, wsm_uuid, sizeof(tee->wsm_uuid) - 1); tee->wsm_uuid[sizeof(tee->wsm_uuid) - 1] = '\''\\0'\'';/' drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c
         fi
@@ -109,16 +109,21 @@ jobs:
         # 13. 修复 mtk_charger.c 中的语法错误（保留充电功能）
         echo "修复 mtk_charger.c 语法错误..."
         if [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ]; then
-          # 替换问题代码块，保留充电电流限制核心逻辑
           sed -i '205,215c\    if (ret) {\n        pr_err("charger: failed to set current limit\\n");\n        return ret;\n    }' drivers/power/supply/mediatek/charger/mtk_charger.c
         fi
 
-        echo "所有源码修复完成"
+        # 14. 修复 extcon-mtk-usb.c 中的变量名拼写错误（tval -> pval）
+        echo "修复 extcon-mtk-usb.c 变量名错误..."
+        if [ -f "drivers/misc/mediatek/extcon/extcon-mtk-usb.c" ]; then
+          sed -i 's/tval.intval/pval.intval/g' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+        fi
+
+        echo "所有源码修复完成（版本：v${{ env.FIX_VERSION }}）"
 
     - name: Configure kernel
       run: |
         cd $KERNEL_DIR
-        echo "=== 内核配置 ==="
+        echo "=== 内核配置（修复版本：v${{ env.FIX_VERSION }}） ==="
         
         rm -rf out
         mkdir -p out
@@ -165,21 +170,20 @@ jobs:
     - name: Build kernel
       run: |
         cd $KERNEL_DIR
-        echo "=== 开始编译 ==="
+        echo "=== 开始编译（修复版本：v${{ env.FIX_VERSION }}） ==="
         
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        # 增加编译并行度，保留详细日志
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
-          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-pointer-bool-conversion -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point" \
           2>&1 | tee full_build.log || echo "编译中断，检查日志..."
 
     - name: Check build results
       run: |
         cd $KERNEL_DIR
-        echo "=== 构建结果检查 ==="
+        echo "=== 构建结果检查（修复版本：v${{ env.FIX_VERSION }}） ==="
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           echo "✅ 压缩内核镜像生成成功!"
@@ -199,37 +203,38 @@ jobs:
       if: always()
       run: |
         cd $KERNEL_DIR
-        echo "=== 构建报告 ==="
+        echo "=== 构建报告（修复版本：v${{ env.FIX_VERSION }}） ==="
         
         if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
-          echo "🎉 内核编译成功!"
+          echo "🎉 内核编译成功!（当前修复版本：v${{ env.FIX_VERSION }}）"
         elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
-          echo "⚠️  部分成功 - 生成 vmlinux"
+          echo "⚠️  部分成功 - 生成 vmlinux（当前修复版本：v${{ env.FIX_VERSION }}）"
         else
-          echo "❌ 构建失败"
+          echo "❌ 构建失败（当前修复版本：v${{ env.FIX_VERSION }}）"
         fi
         
         echo ""
-        echo "🔧 修复清单:"
-        echo "  ✅ try_to_unmap 参数修复"
-        echo "  ✅ blocktag 格式字符串修复" 
-        echo "  ✅ get_boot_mode 类型冲突修复"
-        echo "  ✅ mtk_cm_mgr memset 修复"
-        echo "  ✅ keyslot-manager 内联函数修复"
-        echo "  ✅ blk-crypto 内联函数修复"
-        echo "  ✅ blk-crypto.c 函数调用修复"
-        echo "  ✅ mtk_battery.c kstrtoint 返回值修复"
-        echo "  ✅ ccci_util_lib_sys.c 地址警告修复"
-        echo "  ✅ mtk_charger_intf.h 开关不可达修复"
-        echo "  ✅ cmdq_sec_mtee.c 字符串终止符修复（关键）"
-        echo "  ✅ gl_cfg80211.c memset 元素大小修复"
-        echo "  ✅ mtk_charger.c 语法错误修复（保留充电功能）"
+        echo "🔧 修复清单（共14项）:"
+        echo "  1. ✅ try_to_unmap 参数修复"
+        echo "  2. ✅ blocktag 格式字符串修复" 
+        echo "  3. ✅ get_boot_mode 类型冲突修复"
+        echo "  4. ✅ mtk_cm_mgr memset 修复"
+        echo "  5. ✅ keyslot-manager 内联函数修复"
+        echo "  6. ✅ blk-crypto 内联函数修复"
+        echo "  7. ✅ blk-crypto.c 函数调用修复"
+        echo "  8. ✅ mtk_battery.c kstrtoint 返回值修复"
+        echo "  9. ✅ ccci_util_lib_sys.c 地址警告修复"
+        echo " 10. ✅ mtk_charger_intf.h 开关不可达修复"
+        echo " 11. ✅ cmdq_sec_mtee.c 字符串终止符修复（关键）"
+        echo " 12. ✅ gl_cfg80211.c memset 元素大小修复"
+        echo " 13. ✅ mtk_charger.c 语法错误修复（保留充电功能）"
+        echo " 14. ✅ extcon-mtk-usb.c 变量名拼写错误修复（tval -> pval）"
 
     - name: Upload artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.run_number }}
+        name: kernel-build-v${{ env.FIX_VERSION }}-${{ github.run_number }}
         path: |
           ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
           ${{ env.KERNEL_DIR }}/out/vmlinux
