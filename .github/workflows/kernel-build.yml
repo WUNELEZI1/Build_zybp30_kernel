@@ -11,7 +11,7 @@ on:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  FIX_VERSION: "17"  # 版本递增（包含你的手动修复）
+  FIX_VERSION: "18"  # 新增alsps.c参数修复
 
 jobs:
   build:
@@ -34,7 +34,7 @@ jobs:
 
     - name: Clone and fix kernel source
       run: |
-        # 克隆你的fork仓库（已修改为你的地址）
+        # 克隆你的fork仓库
         git clone --depth=1 --branch=mt6768-4.19 \
           https://github.com/WUNELEZI1/Gale-Kernel-Source.git \
           kernel-source
@@ -44,7 +44,6 @@ jobs:
         
         echo "=== 应用基础编译修复（版本：v${{ env.FIX_VERSION }}） ==="
         
-        # 1-14项修复保持不变
         # 1. 修复 try_to_unmap 参数问题
         echo "修复 mm/huge_memory.c..."
         sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
@@ -120,9 +119,18 @@ jobs:
           sed -i 's/tval.intval/pval.intval/g' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
         fi
 
-        # 【已移除】第15项：hacc_sk.c 的SMSG宏修复（你已手动完成，无需自动修改）
+        # 15. 手动修复：hacc_sk.c SMSG 宏参数传递错误（已完成）
 
-        # 16. Kconfig 修复保持不变
+        # 16. 新增：修复 alsps.c 中函数参数声明与头文件不匹配（数组vs指针）
+        echo "修复 alsps.c 中数组与指针参数不匹配..."
+        if [ -f "drivers/misc/mediatek/sensors-1.0/alsps/alsps.c" ]; then
+          # 修复 rgbw_data_report_t 函数参数
+          sed -i 's/int rgbw_data_report_t(int \*value, int64_t time_stamp)/int rgbw_data_report_t(int value[4], int64_t time_stamp)/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
+          # 修复 rgbw_data_report 函数参数
+          sed -i 's/int rgbw_data_report(int \*value)/int rgbw_data_report(int value[4])/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
+        fi
+
+        # 17. Kconfig 修复
         echo "修复 Kconfig 配置冲突..."
         if [ -f "drivers/power/supply/mediatek/charger/Kconfig" ]; then
           sed -i 's/bool "BQ25890 Charger support"/tristate "BQ25890 Charger support"/g' drivers/power/supply/mediatek/charger/Kconfig
@@ -235,7 +243,7 @@ jobs:
         fi
         
         echo ""
-        echo "🔧 修复清单（共16项）:"
+        echo "🔧 修复清单（共17项）:"
         echo "  1. ✅ try_to_unmap 参数修复"
         echo "  2. ✅ blocktag 格式字符串修复" 
         echo "  3. ✅ get_boot_mode 类型冲突修复"
@@ -250,8 +258,9 @@ jobs:
         echo " 12. ✅ gl_cfg80211.c memset 元素大小修复"
         echo " 13. ✅ mtk_charger.c 语法错误修复（保留充电功能）"
         echo " 14. ✅ extcon-mtk-usb.c 变量名拼写错误修复（tval -> pval）"
-        echo " 15. ✅ hacc_sk.c SMSG 宏参数传递错误修复（手动完成）"  # 标注手动修复
-        echo " 16. ✅ Kconfig 类型冲突（tristate/bool）和依赖问题修复"
+        echo " 15. ✅ hacc_sk.c SMSG 宏参数传递错误修复（手动完成）"
+        echo " 16. ✅ alsps.c 函数参数声明与头文件不匹配修复（数组vs指针）"  # 新增修复项
+        echo " 17. ✅ Kconfig 类型冲突（tristate/bool）和依赖问题修复"
 
     - name: Upload artifacts
       if: always()
