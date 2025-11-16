@@ -45,11 +45,12 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # 新增：修复函数参数类型冲突（enum与int不匹配）
+        # 重点修复：统一函数声明与定义的类型（返回值+参数）
+        # 错误显示声明为unsigned int(int)，但定义可能为int(enum)，此处强制与定义匹配
         [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ] && {
-          echo "修复 mtk_cm_mgr.h 中函数参数类型冲突..."
-          # 将枚举类型参数改为int，与定义保持一致
-          sed -i '99s/enum mt_cpu_dvfs_id id/int id/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
+          echo "修复 mtk_cm_mgr.h 中函数类型冲突..."
+          # 假设函数定义为int(enum mt_cpu_dvfs_id)，此处声明同步
+          sed -i '99s/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/int mt_cpufreq_get_cur_phy_freq_no_lock(enum mt_cpu_dvfs_id id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
         }
         
         # 修复内联函数声明错误
