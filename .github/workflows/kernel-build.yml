@@ -45,22 +45,18 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # 修复1：函数指针判断逻辑错误（比较永远为true）
-        # 原错误：检查函数地址是否为NULL（永远为true），应检查函数返回值
+        # 修复1：函数指针判断逻辑错误
         [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
-          echo "修复 ccci_util_lib_sys.c 中函数返回值判断..."
           sed -i '257s/ccci_get_plat_ft_inf != NULL/ccci_get_plat_ft_inf() != NULL/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
         }
         
-        # 修复2：变量拼写错误+缩进误导
-        # 原错误：bResulst（拼写错误）+ if语句无大括号导致缩进问题
+        # 修复2：保持变量名与声明一致（bResulst），并修复缩进
+        # 原错误：变量实际声明为bResulst，之前误改为bResult导致未声明
         [ -f "drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c" ] && {
-          echo "修复 camera_dpe.c 中变量拼写和缩进..."
-          # 修正变量名拼写（bResulst → bResult）
-          sed -i '4708s/bResulst/bResult/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
-          # 为if语句添加大括号，避免缩进误导
-          sed -i '4708s/if (bResult == MFALSE)/if (bResult == MFALSE) {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
-          # 假设下一行是单条语句，添加闭合括号（根据实际代码调整行数）
+          echo "修复 camera_dpe.c 中变量名和缩进..."
+          # 保持原变量名bResulst（与声明一致），添加大括号修复缩进
+          sed -i '4708s/if (bResulst == MFALSE)/if (bResulst == MFALSE) {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
+          # 为if语句添加闭合括号（假设下一行是单条语句，缩进后加}）
           sed -i '4709s/^/    /; 4709a }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
         }
         
