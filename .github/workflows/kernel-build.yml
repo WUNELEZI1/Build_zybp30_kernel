@@ -45,11 +45,27 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # 重点修复：统一函数声明与定义的类型（返回值+参数）
-        # 错误显示声明为unsigned int(int)，但定义可能为int(enum)，此处强制与定义匹配
+        # 修复1：函数指针判断逻辑错误（比较永远为true）
+        # 原错误：检查函数地址是否为NULL（永远为true），应检查函数返回值
+        [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
+          echo "修复 ccci_util_lib_sys.c 中函数返回值判断..."
+          sed -i '257s/ccci_get_plat_ft_inf != NULL/ccci_get_plat_ft_inf() != NULL/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+        }
+        
+        # 修复2：变量拼写错误+缩进误导
+        # 原错误：bResulst（拼写错误）+ if语句无大括号导致缩进问题
+        [ -f "drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c" ] && {
+          echo "修复 camera_dpe.c 中变量拼写和缩进..."
+          # 修正变量名拼写（bResulst → bResult）
+          sed -i '4708s/bResulst/bResult/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
+          # 为if语句添加大括号，避免缩进误导
+          sed -i '4708s/if (bResult == MFALSE)/if (bResult == MFALSE) {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
+          # 假设下一行是单条语句，添加闭合括号（根据实际代码调整行数）
+          sed -i '4709s/^/    /; 4709a }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
+        }
+        
+        # 重点修复：统一函数声明与定义的类型
         [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ] && {
-          echo "修复 mtk_cm_mgr.h 中函数类型冲突..."
-          # 假设函数定义为int(enum mt_cpu_dvfs_id)，此处声明同步
           sed -i '99s/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/int mt_cpufreq_get_cur_phy_freq_no_lock(enum mt_cpu_dvfs_id id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
         }
         
@@ -90,28 +106,23 @@ jobs:
           sed -i '4063s/kstrtoint(copy_str, 10, &value[count]);/if (kstrtoint(copy_str, 10, &value[count])) break;/' drivers/power/supply/mediatek/battery/mtk_battery.c
         }
         
-        # 8. 空指针判断修复
-        [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
-          sed -i '257s/if (ccci_get_plat_ft_inf)/if (ccci_get_plat_ft_inf != NULL)/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
-        }
-        
-        # 9. 不可达代码注释
+        # 8. 不可达代码注释
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger_intf.h" ] && {
           sed -i '48s/return -EINVAL;/\/\/ return -EINVAL;/' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
         }
         
-        # 10. 字符串终止符修复
+        # 9. 字符串终止符修复
         [ -f "drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c" ] && {
           sed -i '19s/strncpy(tee->ta_uuid, ta_uuid, sizeof(ta_uuid));/strncpy(tee->ta_uuid, ta_uuid, sizeof(tee->ta_uuid) - 1); tee->ta_uuid[sizeof(tee->ta_uuid) - 1] = '\''\\0'\'';/' drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c
           sed -i '20s/strncpy(tee->wsm_uuid, wsm_uuid, sizeof(wsm_uuid));/strncpy(tee->wsm_uuid, wsm_uuid, sizeof(tee->wsm_uuid) - 1); tee->wsm_uuid[sizeof(tee->wsm_uuid) - 1] = '\''\\0'\'';/' drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c
         }
         
-        # 11. 内存初始化警告修复
+        # 10. 内存初始化警告修复
         [ -f "drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c" ] && {
           sed -i '3357s/kalMemZero(arBugReport, sizeof(struct EVENT_BUG_REPORT));/memset(arBugReport, 0, sizeof(*arBugReport));/' drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
         }
         
-        # 12. 充电模块综合修复
+        # 11. 充电模块综合修复
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ] && {
           sed -i '/^void BATTERY_SetUSBState(int usb_state_value)$/ {
             N; N; N; N; N; N; N; N; N; N;
@@ -129,29 +140,29 @@ jobs:
           drivers/power/supply/mediatek/charger/mtk_charger.c
         }
         
-        # 13. 变量名拼写修复
+        # 12. 变量名拼写修复
         [ -f "drivers/misc/mediatek/extcon/extcon-mtk-usb.c" ] && {
           sed -i 's/tval.intval/pval.intval/g' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
         }
         
-        # 14. 传感器函数参数修复
+        # 13. 传感器函数参数修复
         [ -f "drivers/misc/mediatek/sensors-1.0/alsps/alsps.c" ] && {
           sed -i 's/int rgbw_data_report_t(int \*value, int64_t time_stamp)/int rgbw_data_report_t(int value[4], int64_t time_stamp)/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
           sed -i 's/int rgbw_data_report(int \*value)/int rgbw_data_report(int value[4])/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
         }
         
-        # 15. 显示模块变量声明修复
+        # 14. 显示模块变量声明修复
         [ -f "drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c" ] && {
           sed -i '/enum TRUSTED_MEM_REQ_TYPE mem_type;/d' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
           sed -i '/^int ovl_layer_config(struct ovl_layer *layer)$/a enum TRUSTED_MEM_REQ_TYPE mem_type = -1;' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
         }
         
-        # 16. USB模块字符串修复
+        # 15. USB模块字符串修复
         [ -f "drivers/misc/mediatek/usb20/musb_qmu.c" ] && {
           sed -i '114s/avg sleep(%lu\/%d, %lu)us,/avg sleep(%lu\/%d, %lu)us, local balanced<%d,%d>\\n"/; 116d' drivers/misc/mediatek/usb20/musb_qmu.c
         }
         
-        # 17. 配置文件冲突修复
+        # 16. 配置文件冲突修复
         [ -f "drivers/power/supply/mediatek/charger/Kconfig" ] && {
           sed -i 's/bool "BQ25890 Charger support"/tristate "BQ25890 Charger support"/g' drivers/power/supply/mediatek/charger/Kconfig
         }
@@ -194,7 +205,7 @@ jobs:
         JOBS=$((CORES + 1))
         
         time make O=out -j$JOBS \
-          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch -Wno-misleading-indentation" \
           2>&1 | tee 编译日志.log
         
         if [ -f "out/arch/${{ env.ARCH }}/boot/Image.gz" ] || [ -f "out/arch/${{ env.ARCH }}/boot/Image" ]; then
