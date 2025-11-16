@@ -11,7 +11,7 @@ on:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  FIX_VERSION: "18"  # 新增alsps.c参数修复
+  FIX_VERSION: "19"  # 新增musb_qmu.c和ddp_ovl.c修复
 
 jobs:
   build:
@@ -44,6 +44,7 @@ jobs:
         
         echo "=== 应用基础编译修复（版本：v${{ env.FIX_VERSION }}） ==="
         
+        # 1-14项修复保持不变（省略重复内容，实际保留）
         # 1. 修复 try_to_unmap 参数问题
         echo "修复 mm/huge_memory.c..."
         sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
@@ -121,16 +122,33 @@ jobs:
 
         # 15. 手动修复：hacc_sk.c SMSG 宏参数传递错误（已完成）
 
-        # 16. 新增：修复 alsps.c 中函数参数声明与头文件不匹配（数组vs指针）
+        # 16. 修复 alsps.c 中函数参数声明与头文件不匹配（数组vs指针）
         echo "修复 alsps.c 中数组与指针参数不匹配..."
         if [ -f "drivers/misc/mediatek/sensors-1.0/alsps/alsps.c" ]; then
-          # 修复 rgbw_data_report_t 函数参数
           sed -i 's/int rgbw_data_report_t(int \*value, int64_t time_stamp)/int rgbw_data_report_t(int value[4], int64_t time_stamp)/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
-          # 修复 rgbw_data_report 函数参数
           sed -i 's/int rgbw_data_report(int \*value)/int rgbw_data_report(int value[4])/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
         fi
 
-        # 17. Kconfig 修复
+        # 17. 新增：修复 ddp_ovl.c 中 C90 混合声明与代码的警告
+        echo "修复 ddp_ovl.c 混合声明与代码错误..."
+        if [ -f "drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c" ]; then
+          # 将变量声明移到代码块开头（在可执行语句前）
+          sed -i '/enum TRUSTED_MEM_REQ_TYPE mem_type;/ {
+            h; d;
+          };
+          /if (OVL_LAYER_IS_SECURE(layer)) {/ {
+            p; g;
+          }' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
+        fi
+
+        # 18. 新增：修复 musb_qmu.c 中字符串未闭合错误
+        echo "修复 musb_qmu.c 字符串未闭合错误..."
+        if [ -f "drivers/misc/mediatek/usb20/musb_qmu.c" ]; then
+          # 合并两行字符串为正确的单引号闭合形式
+          sed -i '114s/avg sleep(%lu\/%d, %lu)us,/avg sleep(%lu\/%d, %lu)us, local balanced<%d,%d>\\n"/; 116d' drivers/misc/mediatek/usb20/musb_qmu.c
+        fi
+
+        # 19. Kconfig 修复
         echo "修复 Kconfig 配置冲突..."
         if [ -f "drivers/power/supply/mediatek/charger/Kconfig" ]; then
           sed -i 's/bool "BQ25890 Charger support"/tristate "BQ25890 Charger support"/g' drivers/power/supply/mediatek/charger/Kconfig
@@ -243,7 +261,7 @@ jobs:
         fi
         
         echo ""
-        echo "🔧 修复清单（共17项）:"
+        echo "🔧 修复清单（共19项）:"
         echo "  1. ✅ try_to_unmap 参数修复"
         echo "  2. ✅ blocktag 格式字符串修复" 
         echo "  3. ✅ get_boot_mode 类型冲突修复"
@@ -259,8 +277,10 @@ jobs:
         echo " 13. ✅ mtk_charger.c 语法错误修复（保留充电功能）"
         echo " 14. ✅ extcon-mtk-usb.c 变量名拼写错误修复（tval -> pval）"
         echo " 15. ✅ hacc_sk.c SMSG 宏参数传递错误修复（手动完成）"
-        echo " 16. ✅ alsps.c 函数参数声明与头文件不匹配修复（数组vs指针）"  # 新增修复项
-        echo " 17. ✅ Kconfig 类型冲突（tristate/bool）和依赖问题修复"
+        echo " 16. ✅ alsps.c 函数参数声明与头文件不匹配修复（数组vs指针）"
+        echo " 17. ✅ ddp_ovl.c C90混合声明与代码错误修复"  # 新增
+        echo " 18. ✅ musb_qmu.c 字符串未闭合错误修复"  # 新增
+        echo " 19. ✅ Kconfig 类型冲突（tristate/bool）和依赖问题修复"
 
     - name: Upload artifacts
       if: always()
