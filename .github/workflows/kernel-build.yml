@@ -3,14 +3,14 @@ name: 编译MT6768内核（充电修复版）
 on:
   workflow_dispatch:
     inputs:
-      config:  # 输入参数名保持英文，避免引用冲突
+      config:
         description: '内核配置文件'
         required: true
         default: 'k69v1_64_k419_defconfig'
 
 env:
-  ARCH: arm64  # 核心变量改用英文，避免兼容性问题
-  BASE_FIX_VERSION: "19"  # 基础版本号（英文变量更规范）
+  ARCH: arm64
+  BASE_FIX_VERSION: "19"
 
 jobs:
   build:
@@ -29,17 +29,15 @@ jobs:
           git wget unzip python3 gcc-aarch64-linux-gnu \
           gcc-arm-linux-gnueabi libncurses-dev dwarves curl file
         sudo ln -sf /usr/bin/python3 /usr/bin/python
-        sudo apt-get clean  # 清理缓存释放空间
+        sudo apt-get clean
 
     - name: 克隆源码并修复
       run: |
-        # 正确引用环境变量计算版本（关键修正）
         CURRENT_FIX_VERSION=$(( ${BASE_FIX_VERSION} + 1 ))
         echo "当前修复版本: v${CURRENT_FIX_VERSION}"
         echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
         echo "CURRENT_FIX_VERSION=${CURRENT_FIX_VERSION}" >> $GITHUB_ENV
         
-        # 浅克隆加速
         git clone --depth=1 --branch=mt6768-4.19 \
           https://github.com/WUNELEZI1/Gale-Kernel-Source.git \
           kernel-source
@@ -96,16 +94,13 @@ jobs:
           sed -i '3357s/kalMemZero(arBugReport, sizeof(struct EVENT_BUG_REPORT));/memset(arBugReport, 0, sizeof(*arBugReport));/' drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
         }
         
-        # 12. 充电模块综合修复（语法+声明+代码块）
+        # 12. 充电模块综合修复
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ] && {
-          # 修复代码块未闭合
           sed -i '/^void BATTERY_SetUSBState(int usb_state_value)$/ {
             N; N; N; N; N; N; N; N; N; N;
             s/\(if (ret) {[^}]*}\)/\1\n}/
           }' drivers/power/supply/mediatek/charger/mtk_charger.c
-          # 修复语法错误
           sed -i '205,215c\    if (ret) {\n        pr_err("charger: failed to set current limit\\n");\n        return ret;\n    }' drivers/power/supply/mediatek/charger/mtk_charger.c
-          # 补充函数声明
           sed -i '/#include "mtk_charger_intf.h"/a \
           static int charger_ftm_open(struct inode *inode, struct file *file);\n\
           static int charger_ftm_release(struct inode *inode, struct file *file);\n\
@@ -139,11 +134,11 @@ jobs:
           sed -i '114s/avg sleep(%lu\/%d, %lu)us,/avg sleep(%lu\/%d, %lu)us, local balanced<%d,%d>\\n"/; 116d' drivers/misc/mediatek/usb20/musb_qmu.c
         }
         
-        # 17. 配置文件冲突修复（修正输入参数引用，关键修复）
+        # 17. 配置文件冲突修复
         [ -f "drivers/power/supply/mediatek/charger/Kconfig" ] && {
           sed -i 's/bool "BQ25890 Charger support"/tristate "BQ25890 Charger support"/g' drivers/power/supply/mediatek/charger/Kconfig
         }
-        [ -f "arch/arm64/configs/${{ github.event.inputs.config }}" ] && {  # 修正为正确的参数名"config"
+        [ -f "arch/arm64/configs/${{ github.event.inputs.config }}" ] && {
           sed -i '/CONFIG_MTK_CACHE_PARITY_CHECK=y/d' arch/arm64/configs/${{ github.event.inputs.config }}
           echo "# CONFIG_MTK_CACHE_PARITY_CHECK is not set" >> arch/arm64/configs/${{ github.event.inputs.config }}
         }
@@ -155,40 +150,36 @@ jobs:
         cd ${{ env.KERNEL_DIR }}
         echo "=== 配置内核 ==="
         
-        rm -rf out && mkdir -p out  # 清理旧输出
+        rm -rf out && mkdir -p out
         
-        # 加载配置
         make O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.config }}
         
-        # 禁用冗余功能（提升编译速度）
         ./scripts/config --file out/.config \
           --disable DEBUG_INFO --disable GDB_SCRIPTS --disable DEBUG_KERNEL \
           --disable TRANSPARENT_HUGEPAGE --disable BLK_DEV_CRYPTO \
           --disable CC_STACKPROTECTOR --disable WERROR \
           --disable CONFIG_ARM64_PTR_AUTH --disable CONFIG_ARM64_BTI
         
-        # 启用必要功能
         ./scripts/config --file out/.config \
           --enable MODULES --enable SMP --enable MACH_MT6768 \
           --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
         
-        # 应用配置
         make O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-    - name: 编译内核
+    - name: 编译内核（实时输出）
       run: |
         cd ${{ env.KERNEL_DIR }}
-        echo "=== 开始编译 ==="
+        echo "=== 开始编译（实时输出，同时保存日志） ==="
         
         export ARCH=${{ env.ARCH }}
         export CROSS_COMPILE=aarch64-linux-gnu-
         CORES=$(nproc)
-        JOBS=$((CORES + 1))  # 平衡并行数（避免内存溢出）
+        JOBS=$((CORES + 1))  # 平衡并行数
         
-        # 编译并记录日志
+        # 关键修改：用tee同时输出到控制台和日志
         time make O=out -j$JOBS \
           KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized" \
-          > 编译日志.log 2>&1
+          2>&1 | tee 编译日志.log  # 实时输出到控制台，同时写入日志
         
         # 标记编译结果
         if [ -f "out/arch/${{ env.ARCH }}/boot/Image.gz" ] || [ -f "out/arch/${{ env.ARCH }}/boot/Image" ]; then
@@ -202,16 +193,14 @@ jobs:
         cd ${{ env.KERNEL_DIR }}
         echo "=== 构建结果 ==="
         
-        # 汇总错误（增加上下文行数，便于定位）
         echo "=== 编译错误汇总（版本：v${{ env.CURRENT_FIX_VERSION }}） ===" > 错误汇总.log
         ERROR_COUNT=$(grep -c "error:" 编译日志.log)
         echo "错误总数：$ERROR_COUNT" >> 错误汇总.log
         if [ $ERROR_COUNT -gt 0 ]; then
-          grep -A 3 -B 2 "error:" 编译日志.log | sort -u >> 错误汇总.log  # 更多上下文
-          cat 错误汇总.log  # 直接显示错误
+          grep -A 3 -B 2 "error:" 编译日志.log | sort -u >> 错误汇总.log
+          cat 错误汇总.log
         fi
         
-        # 输出状态
         if [ "${{ env.BUILD_SUCCESS }}" = "true" ]; then
           echo "✅ 内核镜像生成成功（版本：v${{ env.CURRENT_FIX_VERSION }}）"
         else
