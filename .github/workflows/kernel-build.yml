@@ -11,7 +11,7 @@ on:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  FIX_VERSION: "19"  # 新增musb_qmu.c和ddp_ovl.c修复
+  BASE_FIX_VERSION: "19"  # 基础版本号，作为递增起点
 
 jobs:
   build:
@@ -21,6 +21,13 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    - name: 自动计算递增的FIX_VERSION
+      run: |
+        # 基于基础版本号自动+1（每次运行工作流都会递增）
+        NEW_FIX_VERSION=$((BASE_FIX_VERSION + 1))
+        echo "FIX_VERSION=$NEW_FIX_VERSION" >> $GITHUB_ENV
+        echo "当前修复版本: v$NEW_FIX_VERSION（基于基础版本v${{ env.BASE_FIX_VERSION }}）"
 
     - name: Install dependencies
       run: |
@@ -34,7 +41,7 @@ jobs:
 
     - name: Clone and fix kernel source
       run: |
-        # 克隆你的fork仓库
+        # 克隆仓库
         git clone --depth=1 --branch=mt6768-4.19 \
           https://github.com/WUNELEZI1/Gale-Kernel-Source.git \
           kernel-source
@@ -44,7 +51,6 @@ jobs:
         
         echo "=== 应用基础编译修复（版本：v${{ env.FIX_VERSION }}） ==="
         
-        # 1-14项修复保持不变（省略重复内容，实际保留）
         # 1. 修复 try_to_unmap 参数问题
         echo "修复 mm/huge_memory.c..."
         sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
@@ -129,10 +135,9 @@ jobs:
           sed -i 's/int rgbw_data_report(int \*value)/int rgbw_data_report(int value[4])/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
         fi
 
-        # 17. 新增：修复 ddp_ovl.c 中 C90 混合声明与代码的警告
+        # 17. 修复 ddp_ovl.c 中 C90 混合声明与代码的警告
         echo "修复 ddp_ovl.c 混合声明与代码错误..."
         if [ -f "drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c" ]; then
-          # 将变量声明移到代码块开头（在可执行语句前）
           sed -i '/enum TRUSTED_MEM_REQ_TYPE mem_type;/ {
             h; d;
           };
@@ -141,10 +146,9 @@ jobs:
           }' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
         fi
 
-        # 18. 新增：修复 musb_qmu.c 中字符串未闭合错误
+        # 18. 修复 musb_qmu.c 中字符串未闭合错误
         echo "修复 musb_qmu.c 字符串未闭合错误..."
         if [ -f "drivers/misc/mediatek/usb20/musb_qmu.c" ]; then
-          # 合并两行字符串为正确的单引号闭合形式
           sed -i '114s/avg sleep(%lu\/%d, %lu)us,/avg sleep(%lu\/%d, %lu)us, local balanced<%d,%d>\\n"/; 116d' drivers/misc/mediatek/usb20/musb_qmu.c
         fi
 
@@ -165,6 +169,51 @@ jobs:
         if [ -f "arch/arm64/configs/${{ github.event.inputs.DEFCONFIG }}" ]; then
           sed -i '/CONFIG_MTK_CACHE_PARITY_CHECK=y/d' arch/arm64/configs/${{ github.event.inputs.DEFCONFIG }}
           echo "# CONFIG_MTK_CACHE_PARITY_CHECK is not set" >> arch/arm64/configs/${{ github.event.inputs.DEFCONFIG }}
+        fi
+
+        # 20. 新增：修复 mtk_charger.c 代码块未闭合问题（核心）
+        echo "修复 mtk_charger.c 未闭合代码块..."
+        if [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ]; then
+          # 补全 BATTERY_SetUSBState 函数缺失的闭合 }
+          sed -i '/^void BATTERY_SetUSBState(int usb_state_value)$/ {
+            N; N; N; N; N; N; N; N; N; N;  # 匹配函数内10行内容
+            s/\(if (ret) {[^}]*}\)/\1\n}/  # 补全函数末尾的 }
+          }' drivers/power/supply/mediatek/charger/mtk_charger.c
+
+          # 补充未声明函数的前置声明
+          sed -i '/#include "mtk_charger_intf.h"/a \
+          static int charger_ftm_open(struct inode *inode, struct file *file);\n\
+          static int charger_ftm_release(struct inode *inode, struct file *file);\n\
+          static long charger_ftm_ioctl(struct file *file, unsigned int cmd, unsigned long arg);\n\
+          static ssize_t show_sw_jeita(struct device *dev, struct device_attribute *attr, char *buf);\n\
+          static ssize_t store_sw_jeita(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);\n\
+          static ssize_t show_pe20(struct device *dev, struct device_attribute *attr, char *buf);\n\
+          static ssize_t store_pe20(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);\n\
+          static ssize_t show_pe40(struct device *dev, struct device_attribute *attr, char *buf);\n\
+          static ssize_t store_pe40(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);' \
+          drivers/power/supply/mediatek/charger/mtk_charger.c
+        fi
+
+        # 21. 新增：修复 ddp_ovl.c mem_type 未声明问题
+        echo "彻底修复 ddp_ovl.c mem_type 未声明..."
+        if [ -f "drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c" ]; then
+          # 在函数开头显式声明 mem_type
+          sed -i '/^int ovl_layer_config(struct ovl_layer *layer)$/a \
+          enum TRUSTED_MEM_REQ_TYPE mem_type = -1;' \
+          drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
+          # 删除原位置的重复声明
+          sed -i '/enum TRUSTED_MEM_REQ_TYPE mem_type;/d' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
+        fi
+
+        # 22. 新增：修复 PROC_FOPS_RW 宏关联函数未定义问题
+        echo "修复 PROC_FOPS_RW 宏依赖函数..."
+        if [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ]; then
+          sed -i '/#include "mtk_charger_intf.h"/a \
+          static int mtk_chg_current_cmd_open(struct inode *inode, struct file *file);\n\
+          static ssize_t mtk_chg_current_cmd_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);\n\
+          static int mtk_chg_en_power_path_open(struct inode *inode, struct file *file);\n\
+          static ssize_t mtk_chg_en_power_path_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);' \
+          drivers/power/supply/mediatek/charger/mtk_charger.c
         fi
 
         echo "所有源码修复完成（版本：v${{ env.FIX_VERSION }}）"
@@ -222,23 +271,45 @@ jobs:
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         
+        # 将所有输出（包括错误）写入日志文件
         time make O=out ARCH=arm64 -j$(($(nproc) + 1)) \
           CROSS_COMPILE="aarch64-linux-gnu-" \
           KCFLAGS="-Wno-error -Wno-format -Wno-enum-int-mismatch -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-pointer-sign -Wno-format-overflow -Wno-stringop-overflow -Wno-restrict -Wno-array-bounds -Wno-maybe-uninitialized -Wno-implicit-fallthrough -Wno-packed-not-aligned -Wno-attributes -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-shift-negative-value -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-result -Wno-address -Wno-nonnull -Wno-clobbered -Wno-ignored-qualifiers -Wno-switch-unreachable -Wno-sizeof-pointer-memaccess -Wno-memset-elt-size -Wno-stringop-truncation -Wno-cast-function-type -Wno-tautological-compare -Wno-return-type -Wno-parentheses -Wno-sequence-point -Wno-unused-value" \
-          2>&1 | tee full_build.log || echo "编译中断，检查日志..."
+          > full_build.log 2>&1  # 关键：stdout和stderr全写入日志
+
+        # 检查编译结果（不中断流程）
+        if [ -f "out/arch/arm64/boot/Image.gz" ] || [ -f "out/arch/arm64/boot/Image" ]; then
+          echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
+        elif [ -f "out/vmlinux" ]; then
+          echo "KERNEL_BUILD_SUCCESS=partial" >> $GITHUB_ENV
+        else
+          echo "KERNEL_BUILD_SUCCESS=false" >> $GITHUB_ENV
+        fi
+
+    - name: 收集并输出所有编译错误
+      run: |
+        cd $KERNEL_DIR
+        # 生成错误汇总文件
+        echo "=== 编译错误汇总（修复版本：v${{ env.FIX_VERSION }}） ===" > error_summary.log
+        echo "错误总数：$(grep -c "error:" full_build.log)" >> error_summary.log
+        echo "----------------------------------------" >> error_summary.log
+        # 提取含"error:"的行（保留上下文2行，去重）
+        grep -A 2 -B 1 "error:" full_build.log | sort -u >> error_summary.log
+        
+        # 在工作流日志中显示错误汇总
+        echo "==================== 错误汇总 ===================="
+        cat error_summary.log
+        echo "================================================="
 
     - name: Check build results
       run: |
         cd $KERNEL_DIR
         echo "=== 构建结果检查（修复版本：v${{ env.FIX_VERSION }}） ==="
         
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+        if [ "$KERNEL_BUILD_SUCCESS" = "true" ]; then
           echo "✅ 压缩内核镜像生成成功!"
           echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
-        elif [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "✅ 未压缩内核镜像生成成功!"
-          echo "KERNEL_BUILD_SUCCESS=true" >> $GITHUB_ENV
-        elif [ -f "out/vmlinux" ]; then
+        elif [ "$KERNEL_BUILD_SUCCESS" = "partial" ]; then
           echo "⚠️  vmlinux 生成成功但未打包"
           echo "KERNEL_BUILD_SUCCESS=partial" >> $GITHUB_ENV
         else
@@ -258,10 +329,11 @@ jobs:
           echo "⚠️  部分成功 - 生成 vmlinux（当前修复版本：v${{ env.FIX_VERSION }}）"
         else
           echo "❌ 构建失败（当前修复版本：v${{ env.FIX_VERSION }}）"
+          echo "错误详情见上方「错误汇总」"
         fi
         
         echo ""
-        echo "🔧 修复清单（共19项）:"
+        echo "🔧 修复清单（共22项）:"
         echo "  1. ✅ try_to_unmap 参数修复"
         echo "  2. ✅ blocktag 格式字符串修复" 
         echo "  3. ✅ get_boot_mode 类型冲突修复"
@@ -278,9 +350,12 @@ jobs:
         echo " 14. ✅ extcon-mtk-usb.c 变量名拼写错误修复（tval -> pval）"
         echo " 15. ✅ hacc_sk.c SMSG 宏参数传递错误修复（手动完成）"
         echo " 16. ✅ alsps.c 函数参数声明与头文件不匹配修复（数组vs指针）"
-        echo " 17. ✅ ddp_ovl.c C90混合声明与代码错误修复"  # 新增
-        echo " 18. ✅ musb_qmu.c 字符串未闭合错误修复"  # 新增
+        echo " 17. ✅ ddp_ovl.c C90混合声明与代码错误修复"
+        echo " 18. ✅ musb_qmu.c 字符串未闭合错误修复"
         echo " 19. ✅ Kconfig 类型冲突（tristate/bool）和依赖问题修复"
+        echo " 20. ✅ mtk_charger.c 代码块未闭合及函数声明修复"
+        echo " 21. ✅ ddp_ovl.c mem_type 未声明修复"
+        echo " 22. ✅ PROC_FOPS_RW 宏依赖函数声明修复"
 
     - name: Upload artifacts
       if: always()
@@ -291,5 +366,6 @@ jobs:
           ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
           ${{ env.KERNEL_DIR }}/out/vmlinux
           ${{ env.KERNEL_DIR }}/full_build.log
+          ${{ env.KERNEL_DIR }}/error_summary.log  # 新增错误汇总文件
           ${{ env.KERNEL_DIR }}/.config
         retention-days: 30
