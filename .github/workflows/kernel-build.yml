@@ -45,17 +45,19 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # 新增：修复内联函数声明错误（解决当前报错）
-        # 1. 修复 blk_crypto_flock 内联失败
-        [ -f "include/linux/blk-crypto.h" ] && {
-          echo "修复 blk-crypto.h 中的 always_inline 声明..."
-          sed -i 's/inline void blk_crypto_flock/void blk_crypto_flock/g' include/linux/blk-crypto.h  # 移除 inline
+        # 新增：修复函数参数类型冲突（enum与int不匹配）
+        [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ] && {
+          echo "修复 mtk_cm_mgr.h 中函数参数类型冲突..."
+          # 将枚举类型参数改为int，与定义保持一致
+          sed -i '99s/enum mt_cpu_dvfs_id id/int id/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
         }
         
-        # 2. 修复 uclamp_se_set 内联失败
+        # 修复内联函数声明错误
+        [ -f "include/linux/blk-crypto.h" ] && {
+          sed -i 's/inline void blk_crypto_flock/void blk_crypto_flock/g' include/linux/blk-crypto.h
+        }
         [ -f "kernel/sched/sched.h" ] && {
-          echo "修复 sched.h 中的 always_inline 声明..."
-          sed -i 's/inline void uclamp_se_set/void uclamp_se_set/g' kernel/sched/sched.h  # 移除 inline
+          sed -i 's/inline void uclamp_se_set/void uclamp_se_set/g' kernel/sched/sched.h
         }
         
         # 原有修复步骤（保持不变）
@@ -72,9 +74,9 @@ jobs:
         sed -i 's/memset(count_ack, 0, ARRAY_SIZE(count_ack));/memset(count_ack, 0, sizeof(count_ack));/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c
         sed -i 's/memset(max_load, 0, ARRAY_SIZE(count_ack));/memset(max_load, 0, sizeof(max_load));/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c
         
-        # 5. 内联函数定义修复（补充更多内联函数处理）
+        # 5. 内联函数定义修复
         sed -i 's/always_inline //g' include/linux/keyslot-manager.h
-        sed -i 's/always_inline //g' include/linux/blk-crypto.h  # 再次确保移除
+        sed -i 's/always_inline //g' include/linux/blk-crypto.h
         
         # 6. 未实现函数调用注释
         [ -f "block/blk-crypto.c" ] && {
@@ -190,9 +192,8 @@ jobs:
         CORES=$(nproc)
         JOBS=$((CORES + 1))
         
-        # 补充抑制内联警告的编译选项
         time make O=out -j$JOBS \
-          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch" \
           2>&1 | tee 编译日志.log
         
         if [ -f "out/arch/${{ env.ARCH }}/boot/Image.gz" ] || [ -f "out/arch/${{ env.ARCH }}/boot/Image" ]; then
