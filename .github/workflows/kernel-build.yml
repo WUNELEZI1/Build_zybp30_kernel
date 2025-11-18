@@ -45,10 +45,11 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # -------------------------- 基础修复（保持不变）--------------------------
-        # 修复1：函数指针判断逻辑错误
+        # -------------------------- 基础修复（修正函数参数错误）--------------------------
+        # 修复1：函数调用参数不足问题（核心错误修复）
         [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
-          sed -i '257s/ccci_get_plat_ft_inf/ccci_get_plat_ft_inf()/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+          # 添加缓冲区并传递正确参数，判断返回值大于0
+          sed -i '257s/if (ccci_get_plat_ft_inf()) {/char ft_buf[256];\n        if (ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0) {/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
         }
         
         # 修复2：camera_dpe.c 变量名+缩进错误
