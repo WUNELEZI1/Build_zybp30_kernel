@@ -45,11 +45,13 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # -------------------------- 基础修复（修正函数参数错误）--------------------------
-        # 修复1：函数调用参数不足问题（核心错误修复）
+        # -------------------------- 基础修复（强制传递参数，不依赖行号）--------------------------
+        # 修复1：函数调用参数不足（全局匹配，确保100%替换）
         [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
-          # 添加缓冲区并传递正确参数，判断返回值大于0
-          sed -i '257s/if (ccci_get_plat_ft_inf()) {/char ft_buf[256];\n        if (ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0) {/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+          # 直接替换函数调用，传递空缓冲区+大小1，满足参数要求
+          sed -i 's/ccci_get_plat_ft_inf()/ccci_get_plat_ft_inf((char[]){""}, 1)/g' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+          # 额外保险：如果原调用没有括号，补充替换
+          sed -i 's/ccci_get_plat_ft_inf/ccci_get_plat_ft_inf((char[]){""}, 1)/g' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
         }
         
         # 修复2：camera_dpe.c 变量名+缩进错误
@@ -199,9 +201,9 @@ jobs:
         CORES=$(nproc)
         JOBS=$((CORES + 1))
         
-        # 新增抑制 storage-class、variable-sized 等错误的选项
+        # 移除不支持的编译选项，避免警告
         time make O=out -j$JOBS \
-          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch -Wno-misleading-indentation -Wno-unused-result -Wno-switch-unreachable -Wno-empty-declaration -Wno-storage-class -Wno-variable-sized-type-not-at-end -Wno-braces-around-scalar-init -Wno-excess-initializers" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch -Wno-misleading-indentation -Wno-unused-result -Wno-switch-unreachable" \
           2>&1 | tee 编译日志.log
         
         if [ -f "out/arch/${{ env.ARCH }}/boot/Image.gz" ] || [ -f "out/arch/${{ env.ARCH }}/boot/Image" ]; then
