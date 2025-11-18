@@ -45,42 +45,65 @@ jobs:
         
         echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # -------------------------- 核心修复1：ccci_get_plat_ft_inf函数声明与调用 --------------------------
+        # -------------------------- 修复1：ccci_get_plat_ft_inf检查方式 --------------------------
         [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
-          # 1. 恢复函数声明的正确性（移除错误添加的参数）
-          sed -i 's/ccci_get_plat_ft_inf((char\[\]){""}, 1)(char buf\[\], int size)/ccci_get_plat_ft_inf(char buf[], int size)/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
-          
-          # 2. 修复函数调用处的参数（在调用前定义缓冲区）
-          # 匹配第257行的调用并添加参数
-          sed -i '257s/ccci_get_plat_ft_inf();/char ft_buf[256];\n        ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf));/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
-          # 修复返回值处的调用（第259行和262行）
-          sed -i '259s/ccci_get_plat_ft_inf();/ccci_get_plat_ft_inf(buf, 4095);/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
-          sed -i '262s/ccci_get_plat_ft_inf();/ccci_get_plat_ft_inf(buf, 4095);/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+          # 从检查函数地址改为调用函数并检查返回值
+          sed -i '257s/if (ccci_get_plat_ft_inf) {/char ft_buf[256];\n        if (ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0) {/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
         }
         
-        # -------------------------- 核心修复2：彻底清理mtk_charger_intf.h宏残留 --------------------------
+        # -------------------------- 修复2：mtk_charger_intf.h枚举语法错误 --------------------------
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger_intf.h" ] && {
-          # 1. 删除所有包含##的行（彻底清除宏连接符）
-          sed -i '/##/d' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
+          # 修正枚举末尾多余分号
+          sed -i '98s/,;/,/' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
+          # 补全缺失的枚举值
+          sed -i '/CHARGER_DEV_NOTIFY_VBUS_OVP/a \        CHARGER_DEV_NOTIFY_EOC,\n        CHARGER_DEV_NOTIFY_RECHG,\n        CHARGER_DEV_NOTIFY_SAFETY_TIMEOUT' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
+        }
+        
+        # -------------------------- 修复3：mtk_battery.c kstrtoint返回值处理 --------------------------
+        [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ] && {
+          sed -i '4063s/kstrtoint(copy_str, 10, &value[count]);/if (kstrtoint(copy_str, 10, &value[count])) break;/' drivers/power/supply/mediatek/battery/mtk_battery.c
+        }
+        
+        # -------------------------- 修复4：mtk_charger.c函数声明冲突 --------------------------
+        [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ] && {
+          # 修正函数返回类型以匹配头文件
+          sed -i '72s/struct charger_manager*/struct charger_consumer*/' drivers/power/supply/mediatek/charger/mtk_charger.c
+          sed -i '73s/struct charger_manager*/struct charger_consumer*/' drivers/power/supply/mediatek/charger/mtk_charger.c
+          sed -i '205s/struct charger_manager*/struct charger_consumer*/' drivers/power/supply/mediatek/charger/mtk_charger.c
           
-          # 2. 修复第99行enum的语法错误（确保前一行正确结束）
-          sed -i '98s/$/;/' drivers/power/supply/mediatek/charger/mtk_charger_intf.h  # 前一行补充分号
-          sed -i '99s/^enum {/enum charger_enum {/' drivers/power/supply/mediatek/charger/mtk_charger_intf.h  # 给enum命名避免语法错误
+          # 为未使用变量/函数添加__maybe_unused属性
+          sed -i '127s/static const /static const __maybe_unused /' drivers/power/supply/mediatek/charger/mtk_charger.c
+          sed -i '148s/static struct /static __maybe_unused struct /' drivers/power/supply/mediatek/charger/mtk_charger.c
+          sed -i '205s/static /static __maybe_unused /' drivers/power/supply/mediatek/charger/mtk_charger.c
+          sed -i '206s/static /static __maybe_unused /' drivers/power/supply/mediatek/charger/mtk_charger.c
+          
+          # 为未使用的DEVICE_ATTR添加__maybe_unused
+          sed -i '80,96s/static DEVICE_ATTR/static __maybe_unused DEVICE_ATTR/' drivers/power/supply/mediatek/charger/mtk_charger.c
+        }
+        
+        # -------------------------- 修复5：mtk_switch_charging.c不可达代码和宏定义 --------------------------
+        [ -f "drivers/power/supply/mediatek/charger/mtk_switch_charging.c" ] && {
+          # 注释不可达代码
+          sed -i '1087s/chr_err/#if 0\n        chr_err/' drivers/power/supply/mediatek/charger/mtk_switch_charging.c
+          sed -i '1088s/}/}\n        #endif/' drivers/power/supply/mediatek/charger/mtk_switch_charging.c
+          
+          # 为未使用函数添加__maybe_unused
+          sed -i '69s/static /static __maybe_unused /' drivers/power/supply/mediatek/charger/mtk_switch_charging.c
         }
         
         # -------------------------- 其他原有修复（保持不变）--------------------------
-        # 修复2：camera_dpe.c 变量名+缩进错误
+        # 修复camera_dpe.c
         [ -f "drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c" ] && {
           sed -i '4708s/if (bResulst == MFALSE)/if (bResulst == MFALSE) {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
           sed -i '4709s/^/    /; 4709a }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
         }
         
-        # 修复3：统一函数声明类型
+        # 修复mtk_cm_mgr.h
         [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ] && {
           sed -i '99s/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/int mt_cpufreq_get_cur_phy_freq_no_lock(enum mt_cpu_dvfs_id id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
         }
         
-        # 修复4：内联函数声明错误
+        # 修复内联函数
         [ -f "include/linux/blk-crypto.h" ] && {
           sed -i 's/inline void blk_crypto_flock/void blk_crypto_flock/g' include/linux/blk-crypto.h
         }
@@ -88,18 +111,13 @@ jobs:
           sed -i 's/inline void uclamp_se_set/void uclamp_se_set/g' kernel/sched/sched.h
         }
         
-        # 核心修复：重构mtk_charger.c
+        # 重构mtk_charger.c
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ] && {
           mv drivers/power/supply/mediatek/charger/mtk_charger.c drivers/power/supply/mediatek/charger/mtk_charger.c.bak
           cp $GITHUB_WORKSPACE/.github/scripts/mtk_charger_fixed.c drivers/power/supply/mediatek/charger/mtk_charger.c
         }
         
-        # 修复mtk_battery.c中的kstrtoint返回值
-        [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ] && {
-          sed -i '4063s/kstrtoint(copy_str, 10, &value[count]);/if (kstrtoint(copy_str, 10, &value[count])) break;/' drivers/power/supply/mediatek/battery/mtk_battery.c
-        }
-        
-        # 原有其他修复（保持不变）
+        # 其他基础修复
         sed -i 's/try_to_unmap(page, ttu_flags, NULL, NULL);/try_to_unmap(page, ttu_flags);/g' mm/huge_memory.c
         sed -i 's/"%s aee buffer: %d bytes\\n"/"%s aee buffer: %zu bytes\\n"/g' drivers/misc/mediatek/blocktag/blocktag-core.c
         sed -i 's/unsigned int get_boot_mode(void)/enum boot_mode_t get_boot_mode(void)/g' drivers/input/keyboard/mediatek/mt6768/hal_kpd.c
@@ -174,9 +192,8 @@ jobs:
         CORES=$(nproc)
         JOBS=$((CORES + 1))
         
-        # 关键：确保禁用-Werror，避免警告转错误
         time make O=out -j$JOBS \
-          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch -Wno-misleading-indentation" \
+          KCFLAGS="-Wno-error -Wno-format -Wno-incompatible-pointer-types -Wno-uninitialized -Wno-inline -Wno-enum-int-mismatch -Wno-misleading-indentation -Wno-address -Wno-unused-variable -Wno-unused-function" \
           2>&1 | tee 编译日志.log
         
         if [ -f "out/arch/${{ env.ARCH }}/boot/Image.gz" ] || [ -f "out/arch/${{ env.ARCH }}/boot/Image" ]; then
