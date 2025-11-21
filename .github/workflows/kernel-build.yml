@@ -1,4 +1,4 @@
-name: 编译MT6768内核（最终修复版v21）
+name: 编译MT6768内核（修复sed语法版v21）
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         sudo apt-get clean
 
-    - name: 克隆源码并修复（最终版）
+    - name: 克隆源码并修复（修复sed语法）
       run: |
         CURRENT_FIX_VERSION=$(( ${BASE_FIX_VERSION} + 1 ))
         echo "当前修复版本: v${CURRENT_FIX_VERSION}"
@@ -43,17 +43,16 @@ jobs:
           kernel-source
         cd kernel-source
         
-        echo "=== 应用最终修复（版本：v${CURRENT_FIX_VERSION}） ==="
+        echo "=== 应用修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # -------------------------- 修复1：mtk_charger_intf.h枚举语法彻底修复 --------------------------
+        # -------------------------- 修复1：枚举语法彻底修复（单行sed） --------------------------
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger_intf.h" ] && {
-          # 清理枚举定义，确保语法正确
           sed -i '/enum charger_enum {/,/};/c\enum charger_enum {\n    CHARGER_DEV_NOTIFY_VBUS_OVP,\n    CHARGER_DEV_NOTIFY_EOC,\n    CHARGER_DEV_NOTIFY_RECHG,\n    CHARGER_DEV_NOTIFY_SAFETY_TIMEOUT,\n    CHARGER_DEV_NOTIFY_BAT_OVP\n};' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
         }
         
-        # -------------------------- 修复2：mtk_charger.c函数声明完全匹配头文件 --------------------------
+        # -------------------------- 修复2：函数声明匹配（单行修复） --------------------------
         [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ] && {
-          # 修正函数参数和返回类型以匹配mtk_charger.h
+          # 修正函数声明
           sed -i '72s/static struct charger_manager* charger_manager_get_by_name(const char* name);/static struct charger_consumer* charger_manager_get_by_name(struct device *dev, const char* name);/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '73s/static int charger_manager_enable_high_voltage_charging(struct charger_manager* cm, bool enable);/static int charger_manager_enable_high_voltage_charging(struct charger_consumer* cm, bool enable);/' drivers/power/supply/mediatek/charger/mtk_charger.c
           
@@ -61,52 +60,45 @@ jobs:
           sed -i '205s/static struct charger_manager* charger_manager_get_by_name(const char* name) { return NULL; }/static struct charger_consumer* charger_manager_get_by_name(struct device *dev, const char* name) { return NULL; }/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '206s/static int charger_manager_enable_high_voltage_charging(struct charger_manager* cm, bool enable) { return 0; }/static int charger_manager_enable_high_voltage_charging(struct charger_consumer* cm, bool enable) { return 0; }/' drivers/power/supply/mediatek/charger/mtk_charger.c
           
-          # 添加of.h头文件解决struct of_device_id不完整
+          # 添加of.h头文件
           sed -i '1i#include <linux/of.h>' drivers/power/supply/mediatek/charger/mtk_charger.c
           
-          # 补全of_device_id数组内容并添加__maybe_unused
-          sed -i '127s/static const struct of_device_id mtk_charger_of_match[] = {/static const __maybe_unused struct of_device_id mtk_charger_of_match[] = {\n    { .compatible = "mediatek,mtk-charger" },\n    {} };/' drivers/power/supply/mediatek/charger/mtk_charger.c
+          # 补全of_device_id数组
+          sed -i '127s/static const struct of_device_id mtk_charger_of_match[] = {/static const __maybe_unused struct of_device_id mtk_charger_of_match[] = { { .compatible = "mediatek,mtk-charger" }, {} };/' drivers/power/supply/mediatek/charger/mtk_charger.c
         }
         
-        # -------------------------- 修复3：kstrtoint返回值处理 --------------------------
+        # -------------------------- 修复3：kstrtoint返回值处理（单行） --------------------------
         [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ] && {
-          sed -i '4063s/kstrtoint(copy_str, 10, &value[count]);/if (kstrtoint(copy_str, 10, &value[count])) {\\n                pr_err("Failed to parse value %s\\n", copy_str);\\n                break;\\n            }/' drivers/power/supply/mediatek/battery/mtk_battery.c
+          sed -i '4063s/kstrtoint(copy_str, 10, &value[count]);/if (kstrtoint(copy_str, 10, &value[count])) { pr_err("Failed to parse value %s\\n", copy_str); break; }/' drivers/power/supply/mediatek/battery/mtk_battery.c
         }
         
-        # -------------------------- 修复4：copy_to_user返回值处理 --------------------------
+        # -------------------------- 修复4：copy_to_user返回值处理（单行） --------------------------
         [ -f "drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c" ] && {
-          sed -i '235s/copy_to_user((char *) arg, ver_name, ver_length);/if (copy_to_user((char *) arg, ver_name, ver_length))\\n                return -EFAULT;/' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
+          sed -i '235s/copy_to_user((char *) arg, ver_name, ver_length);/if (copy_to_user((char *) arg, ver_name, ver_length)) return -EFAULT;/' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
         }
         
-        # -------------------------- 其他关键修复 --------------------------
-        # 修复ccci函数检查
+        # -------------------------- 修复5：ccci函数检查 --------------------------
         [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ] && {
-          sed -i '257s/if (ccci_get_plat_ft_inf) {/char ft_buf[256];\n        if (ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0) {/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
+          sed -i '257s/if (ccci_get_plat_ft_inf) {/char ft_buf[256]; if (ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0) {/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
         }
         
-        # 修复camera_dpe.c
+        # -------------------------- 其他修复（保持单行） --------------------------
         [ -f "drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c" ] && {
           sed -i '4708s/if (bResulst == MFALSE)/if (bResulst == MFALSE) {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
-          sed -i '4709s/^/    /; 4709a }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
+          sed -i '4709s/^/    /' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
+          sed -i '4709a }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
         }
         
-        # 修复mtk_cm_mgr.h
         [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ] && {
           sed -i '99s/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/int mt_cpufreq_get_cur_phy_freq_no_lock(enum mt_cpu_dvfs_id id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
         }
         
-        # 修复内联函数
         [ -f "include/linux/blk-crypto.h" ] && {
           sed -i 's/inline void blk_crypto_flock/void blk_crypto_flock/g' include/linux/blk-crypto.h
         }
+        
         [ -f "kernel/sched/sched.h" ] && {
           sed -i 's/inline void uclamp_se_set/void uclamp_se_set/g' kernel/sched/sched.h
-        }
-        
-        # 重构mtk_charger.c
-        [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ] && {
-          mv drivers/power/supply/mediatek/charger/mtk_charger.c drivers/power/supply/mediatek/charger/mtk_charger.c.bak
-          cp $GITHUB_WORKSPACE/.github/scripts/mtk_charger_fixed.c drivers/power/supply/mediatek/charger/mtk_charger.c
         }
         
         # 基础修复
@@ -117,46 +109,54 @@ jobs:
         sed -i 's/memset(max_load, 0, ARRAY_SIZE(count_ack));/memset(max_load, 0, sizeof(max_load));/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c
         sed -i 's/always_inline //g' include/linux/keyslot-manager.h
         sed -i 's/always_inline //g' include/linux/blk-crypto.h
+        
         [ -f "block/blk-crypto.c" ] && {
           sed -i 's/ksm_flock(ksm, flags);/\/\/ ksm_flock(ksm, flags);/g' block/blk-crypto.c
           sed -i 's/blk_crypto_flock(q, flags);/\/\/ blk_crypto_flock(q, flags);/g' block/blk-crypto.c
         }
+        
         [ -f "drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c" ] && {
           sed -i '19s/strncpy(tee->ta_uuid, ta_uuid, sizeof(ta_uuid));/strncpy(tee->ta_uuid, ta_uuid, sizeof(tee->ta_uuid) - 1); tee->ta_uuid[sizeof(tee->ta_uuid) - 1] = '\''\\0'\'';/' drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c
           sed -i '20s/strncpy(tee->wsm_uuid, wsm_uuid, sizeof(wsm_uuid));/strncpy(tee->wsm_uuid, wsm_uuid, sizeof(tee->wsm_uuid) - 1); tee->wsm_uuid[sizeof(tee->wsm_uuid) - 1] = '\''\\0'\'';/' drivers/misc/mediatek/cmdq/v3/cmdq_sec_mtee.c
         }
+        
         [ -f "drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c" ] && {
           sed -i '3357s/kalMemZero(arBugReport, sizeof(struct EVENT_BUG_REPORT));/memset(arBugReport, 0, sizeof(*arBugReport));/' drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
         }
+        
         [ -f "drivers/misc/mediatek/extcon/extcon-mtk-usb.c" ] && {
           sed -i 's/tval.intval/pval.intval/g' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
         }
+        
         [ -f "drivers/misc/mediatek/sensors-1.0/alsps/alsps.c" ] && {
           sed -i 's/int rgbw_data_report_t(int \*value, int64_t time_stamp)/int rgbw_data_report_t(int value[4], int64_t time_stamp)/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
           sed -i 's/int rgbw_data_report(int \*value)/int rgbw_data_report(int value[4])/g' drivers/misc/mediatek/sensors-1.0/alsps/alsps.c
         }
+        
         [ -f "drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c" ] && {
           sed -i '/enum TRUSTED_MEM_REQ_TYPE mem_type;/d' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
           sed -i '/^int ovl_layer_config(struct ovl_layer *layer)$/a enum TRUSTED_MEM_REQ_TYPE mem_type = -1;' drivers/misc/mediatek/video/mt6768/dispsys/ddp_ovl.c
         }
+        
         [ -f "drivers/misc/mediatek/usb20/musb_qmu.c" ] && {
-          sed -i '114s/avg sleep(%lu\/%d, %lu)us,/avg sleep(%lu\/%d, %lu)us, local balanced<%d,%d>\\n"/; 116d' drivers/misc/mediatek/usb20/musb_qmu.c
+          sed -i '114s/avg sleep(%lu\/%d, %lu)us,/avg sleep(%lu\/%d, %lu)us, local balanced<%d,%d>\\n"/' drivers/misc/mediatek/usb20/musb_qmu.c
+          sed -i '116d' drivers/misc/mediatek/usb20/musb_qmu.c
         }
+        
         [ -f "drivers/power/supply/mediatek/charger/Kconfig" ] && {
           sed -i 's/bool "BQ25890 Charger support"/tristate "BQ25890 Charger support"/g' drivers/power/supply/mediatek/charger/Kconfig
         }
+        
         [ -f "arch/arm64/configs/${{ github.event.inputs.config }}" ] && {
           sed -i '/CONFIG_MTK_CACHE_PARITY_CHECK=y/d' arch/arm64/configs/${{ github.event.inputs.config }}
           echo "# CONFIG_MTK_CACHE_PARITY_CHECK is not set" >> arch/arm64/configs/${{ github.event.inputs.config }}
         }
         
-        echo "最终修复完成（版本：v${CURRENT_FIX_VERSION}）"
+        echo "修复完成（版本：v${CURRENT_FIX_VERSION}）"
 
     - name: 配置内核
       run: |
         cd ${{ env.KERNEL_DIR }}
-        echo "=== 配置内核 ==="
-        
         rm -rf out && mkdir -p out
         
         make O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.config }}
@@ -177,8 +177,6 @@ jobs:
     - name: 编译内核
       run: |
         cd ${{ env.KERNEL_DIR }}
-        echo "=== 开始编译 ==="
-        
         export ARCH=${{ env.ARCH }}
         export CROSS_COMPILE=aarch64-linux-gnu-
         CORES=$(nproc)
