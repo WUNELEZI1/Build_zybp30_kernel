@@ -1,4 +1,4 @@
-name: 编译MT6768内核（极简修复版v21）
+name: 编译MT6768内核（最终解决版v21）
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         sudo apt-get clean
 
-    - name: 克隆源码并修复（极简版）
+    - name: 克隆源码并修复（最终解决版）
       run: |
         CURRENT_FIX_VERSION=$(( ${BASE_FIX_VERSION} + 1 ))
         echo "当前修复版本: v${CURRENT_FIX_VERSION}"
@@ -43,82 +43,79 @@ jobs:
           kernel-source
         cd kernel-source
         
-        echo "=== 应用极简修复（版本：v${CURRENT_FIX_VERSION}） ==="
+        echo "=== 应用最终修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # -------------------------- 修复1：枚举修复（分步操作） --------------------------
+        # -------------------------- 修复1：mt_cpufreq声明冲突 --------------------------
+        if [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ]; then
+          # 保持声明与其他头文件一致
+          sed -i '99s/int mt_cpufreq_get_cur_phy_freq_no_lock(enum mt_cpu_dvfs_id id)/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
+        fi
+        
+        # -------------------------- 修复2：ksm_flock内联函数问题 --------------------------
+        if [ -f "include/linux/keyslot-manager.h" ]; then
+          # 移除always_inline属性
+          sed -i '101s/inline void ksm_flock/void ksm_flock/' include/linux/keyslot-manager.h
+          sed -i 's/always_inline //g' include/linux/keyslot-manager.h
+        fi
+        
+        # -------------------------- 修复3：blk_crypto_flock内联问题 --------------------------
+        if [ -f "include/linux/blk-crypto.h" ]; then
+          sed -i 's/inline void blk_crypto_flock/void blk_crypto_flock/' include/linux/blk-crypto.h
+        fi
+        
+        # -------------------------- 之前的关键修复 --------------------------
+        # 枚举修复
         if [ -f "drivers/power/supply/mediatek/charger/mtk_charger_intf.h" ]; then
-          # 删除原有枚举
           sed -i '/enum charger_enum {/,/};/d' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
-          # 在合适位置添加正确枚举
           sed -i '/enum charger_enum/a enum charger_enum {\n    CHARGER_DEV_NOTIFY_VBUS_OVP,\n    CHARGER_DEV_NOTIFY_EOC,\n    CHARGER_DEV_NOTIFY_RECHG,\n    CHARGER_DEV_NOTIFY_SAFETY_TIMEOUT,\n    CHARGER_DEV_NOTIFY_BAT_OVP\n};' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
         fi
         
-        # -------------------------- 修复2：mtk_charger.c修复（分步） --------------------------
+        # mtk_charger.c修复
         if [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ]; then
-          # 添加of.h头文件
           sed -i '1i#include <linux/of.h>' drivers/power/supply/mediatek/charger/mtk_charger.c
-          
-          # 修复函数声明
           sed -i '72s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '72s/(const/(struct device *dev, const/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '73s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          
-          # 修复函数实现
           sed -i '205s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '205s/(const/(struct device *dev, const/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '206s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          
-          # 修复of_device_id
           sed -i '127s/struct of_device_id/__maybe_unused struct of_device_id/' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '128i     { .compatible = "mediatek,mtk-charger" },' drivers/power/supply/mediatek/charger/mtk_charger.c
           sed -i '129i     {}' drivers/power/supply/mediatek/charger/mtk_charger.c
         fi
         
-        # -------------------------- 修复3：kstrtoint返回值 --------------------------
+        # 返回值处理
         if [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ]; then
           sed -i '4063s/kstrtoint(/ret = kstrtoint(/' drivers/power/supply/mediatek/battery/mtk_battery.c
           sed -i '4064i         if (ret)' drivers/power/supply/mediatek/battery/mtk_battery.c
           sed -i '4065i             break;' drivers/power/supply/mediatek/battery/mtk_battery.c
         fi
         
-        # -------------------------- 修复4：copy_to_user返回值 --------------------------
         if [ -f "drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c" ]; then
           sed -i '235s/copy_to_user/ret = copy_to_user/' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
           sed -i '236i         if (ret)' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
           sed -i '237i             return -EFAULT;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
         fi
         
-        # -------------------------- 修复5：ccci函数检查 --------------------------
+        # ccci修复
         if [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ]; then
           sed -i '257i         char ft_buf[256];' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
           sed -i '258s/ccci_get_plat_ft_inf/ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
         fi
         
-        # -------------------------- 基础修复（简单sed） --------------------------
-        # camera_dpe.c
+        # camera_dpe.c修复
         if [ -f "drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c" ]; then
           sed -i '4708s/$/ {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
           sed -i '4709s/^/    /' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
           sed -i '4710i }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
         fi
         
-        # mt_cpufreq声明
-        if [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ]; then
-          sed -i '99s/unsigned int/int/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
-          sed -i '99s/(int/(enum mt_cpu_dvfs_id/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
-        fi
-        
-        # 内联函数
-        sed -i 's/inline void /void /g' include/linux/blk-crypto.h 2>/dev/null
-        sed -i 's/inline void /void /g' kernel/sched/sched.h 2>/dev/null
-        
-        # 其他简单修复
+        # 其他基础修复
         sed -i 's/, NULL, NULL//g' mm/huge_memory.c 2>/dev/null
         sed -i 's/%d bytes/%zu bytes/g' drivers/misc/mediatek/blocktag/blocktag-core.c 2>/dev/null
         sed -i 's/unsigned int/enum boot_mode_t/g' drivers/input/keyboard/mediatek/mt6768/hal_kpd.c 2>/dev/null
         sed -i 's/ARRAY_SIZE(count_ack)/sizeof(count_ack)/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c 2>/dev/null
         sed -i 's/ARRAY_SIZE(count_ack)/sizeof(max_load)/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c 2>/dev/null
-        sed -i 's/always_inline //g' include/linux/keyslot-manager.h 2>/dev/null
         
         echo "修复完成（版本：v${CURRENT_FIX_VERSION}）"
 
