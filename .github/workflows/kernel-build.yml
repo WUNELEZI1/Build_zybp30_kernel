@@ -1,4 +1,4 @@
-name: 编译MT6768内核（解决内联函数版v21）
+name: 编译MT6768内核（修复类型冲突版v21）
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         sudo apt-get clean
 
-    - name: 克隆源码并修复（解决内联函数问题）
+    - name: 克隆源码并修复（最终解决类型冲突）
       run: |
         CURRENT_FIX_VERSION=$(( ${BASE_FIX_VERSION} + 1 ))
         echo "当前修复版本: v${CURRENT_FIX_VERSION}"
@@ -45,18 +45,17 @@ jobs:
         
         echo "=== 应用最终修复（版本：v${CURRENT_FIX_VERSION}） ==="
         
-        # -------------------------- 修复1：uclamp_se_set内联函数问题 --------------------------
-        if [ -f "kernel/sched/sched.h" ]; then
-          # 移除inline关键字
-          sed -i '2370s/inline void uclamp_se_set/void uclamp_se_set/' kernel/sched/sched.h
-          # 移除always_inline属性（如果有）
-          sed -i 's/__always_inline//g' kernel/sched/sched.h
-          sed -i 's/always_inline//g' kernel/sched/sched.h
+        # -------------------------- 修复1：mt_cpufreq声明重复unsigned问题 --------------------------
+        if [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ]; then
+          # 修复重复unsigned和参数类型，保持与mtk_cpufreq_api.h一致
+          sed -i '99s/unsigned unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(unsigned int cluster_id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
         fi
         
-        # -------------------------- 修复2：mt_cpufreq声明冲突 --------------------------
-        if [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ]; then
-          sed -i '99s/int mt_cpufreq_get_cur_phy_freq_no_lock(enum mt_cpu_dvfs_id id)/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
+        # -------------------------- 修复2：uclamp_se_set内联函数问题 --------------------------
+        if [ -f "kernel/sched/sched.h" ]; then
+          sed -i '2370s/inline void uclamp_se_set/void uclamp_se_set/' kernel/sched/sched.h
+          sed -i 's/__always_inline//g' kernel/sched/sched.h
+          sed -i 's/always_inline//g' kernel/sched/sched.h
         fi
         
         # -------------------------- 修复3：ksm_flock内联函数问题 --------------------------
