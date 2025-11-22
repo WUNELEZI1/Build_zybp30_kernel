@@ -1,4 +1,4 @@
-name: 编译MT6768内核（修复变量声明版v22）
+name: 编译MT6768内核（修复sed语法版v22）
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         sudo apt-get clean
 
-    - name: 克隆源码并修复（解决变量声明问题）
+    - name: 克隆源码并修复（解决sed语法问题）
       run: |
         CURRENT_FIX_VERSION=$(( ${BASE_FIX_VERSION} + 1 ))
         echo "当前修复版本: v${CURRENT_FIX_VERSION}"
@@ -91,26 +91,29 @@ jobs:
         
         # -------------------------- 修复7：mtk_battery.c ret变量声明问题 --------------------------
         if [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ]; then
-          # 在使用ret之前声明变量
-          sed -i '/kstrtoint(copy_str, 10, &value\[count\]);/i         int ret;' drivers/power/supply/mediatek/battery/mtk_battery.c
-          sed -i 's/kstrtoint(/ret = kstrtoint(/' drivers/power/supply/mediatek/battery/mtk_battery.c
-          sed -i '/ret = kstrtoint/a         if (ret)\n             break;' drivers/power/supply/mediatek/battery/mtk_battery.c
+          # 使用行号定位，避免特殊字符问题
+          sed -i '4062i         int ret;' drivers/power/supply/mediatek/battery/mtk_battery.c
+          sed -i '4063s/kstrtoint(/ret = kstrtoint(/' drivers/power/supply/mediatek/battery/mtk_battery.c
+          sed -i '4064i         if (ret)' drivers/power/supply/mediatek/battery/mtk_battery.c
+          sed -i '4065i             break;' drivers/power/supply/mediatek/battery/mtk_battery.c
         fi
         
         # -------------------------- 修复8：extcon-mtk-usb.c tval变量问题 --------------------------
         if [ -f "drivers/misc/mediatek/extcon/extcon-mtk-usb.c" ]; then
-          # 声明tval变量，或者将tval改为pval
-          sed -i '/(tval.intval == POWER_SUPPLY_TYPE_USB ||/i         union power_supply_propval tval;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '/(tval.intval == POWER_SUPPLY_TYPE_USB ||/i         int ret;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '/(tval.intval == POWER_SUPPLY_TYPE_USB ||/i         ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_TYPE, &tval);' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '/(tval.intval == POWER_SUPPLY_TYPE_USB ||/i         if (ret < 0)\n             return;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+          # 使用行号定位修复
+          sed -i '185i         int ret;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+          sed -i '186i         union power_supply_propval tval;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+          sed -i '187i         ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_TYPE, &tval);' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+          sed -i '188i         if (ret < 0)' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+          sed -i '189i             return;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
         fi
         
-        # -------------------------- 修复9：copy_to_user返回值处理 --------------------------
+        # -------------------------- 修复9：fw_log_wifi.c copy_to_user返回值处理 --------------------------
         if [ -f "drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c" ]; then
-          sed -i '/copy_to_user/dst, buf, len);/i         int ret;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
-          sed -i 's/copy_to_user/ret = copy_to_user/' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
-          sed -i '/ret = copy_to_user/a         if (ret)\n             return -EFAULT;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
+          sed -i '234i         int ret;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
+          sed -i '235s/copy_to_user/ret = copy_to_user/' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
+          sed -i '236i         if (ret)' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
+          sed -i '237i             return -EFAULT;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
         fi
         
         # -------------------------- 修复10：ccci修复 --------------------------
