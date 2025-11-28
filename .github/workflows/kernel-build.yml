@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: '内核配置文件 (默认为 MT6768 配置)'
+        description: '内核配置文件'
         required: true
         default: 'k69v1_64_k419_defconfig'
       build_target:
@@ -28,11 +28,32 @@ jobs:
     timeout-minutes: 120
 
     steps:
-    - name: 检出内核源码
+    - name: 检出当前仓库
       uses: actions/checkout@v4
-      with:
-        repository: MediaTek-Labs/common-kernel-4.19
-        ref: main
+
+    - name: 克隆内核源码
+      run: |
+        echo "=== 克隆内核源码 ==="
+        
+        # 尝试克隆 MediaTek 内核仓库
+        if git clone --depth=1 --branch=main https://github.com/MediaTek-Labs/common-kernel-4.19.git kernel-source; then
+          echo "✅ 成功克隆 MediaTek 内核源码"
+          echo "KERNEL_SOURCE=kernel-source" >> $GITHUB_ENV
+        else
+          echo "❌ MediaTek 仓库克隆失败，尝试备用仓库"
+          # 尝试克隆你原来的仓库作为备用
+          if git clone --depth=1 --branch=mt6768-4.19 https://github.com/WUNELEZI1/Gale-Kernel-Source.git kernel-source; then
+            echo "✅ 成功克隆备用内核源码"
+            echo "KERNEL_SOURCE=kernel-source" >> $GITHUB_ENV
+          else
+            echo "❌ 所有仓库克隆都失败"
+            exit 1
+          fi
+        fi
+        
+        cd kernel-source
+        echo "内核目录: $(pwd)"
+        echo "内核版本: $(make kernelversion 2>/dev/null || echo '未知')"
 
     - name: 安装编译依赖
       run: |
@@ -47,6 +68,7 @@ jobs:
 
     - name: 显示环境信息
       run: |
+        cd ${{ env.KERNEL_SOURCE }}
         echo "=== 构建环境信息 ==="
         echo "内核版本: $(make kernelversion 2>/dev/null || echo '未知')"
         echo "架构: $ARCH"
@@ -58,17 +80,25 @@ jobs:
 
     - name: 配置内核 (通用方法)
       run: |
+        cd ${{ env.KERNEL_SOURCE }}
         echo "=== 步骤1: 生成默认配置 ==="
         
         # 清理之前的配置
         make mrproper
         
+        # 显示可用的配置
+        echo "可用的配置文件:"
+        find arch/arm64/configs -name "*defconfig" | head -10 || echo "未找到配置文件"
+        
         # 尝试生成配置
         echo "使用配置: ${{ github.event.inputs.defconfig }}"
         if ! make ${{ github.event.inputs.defconfig }}; then
-          echo "❌ 配置生成失败，尝试查找可用配置..."
-          find arch/arm64/configs -name "*defconfig" | head -10
-          exit 1
+          echo "❌ 配置生成失败"
+          echo "尝试使用默认配置..."
+          if ! make defconfig; then
+            echo "❌ 所有配置尝试都失败"
+            exit 1
+          fi
         fi
         
         echo "✅ 配置生成成功"
@@ -80,6 +110,7 @@ jobs:
     - name: 编译内核 (通用方法)
       id: compile
       run: |
+        cd ${{ env.KERNEL_SOURCE }}
         echo "=== 步骤2: 开始编译内核 ==="
         
         CORES=$(nproc)
@@ -121,7 +152,14 @@ jobs:
     - name: 分析编译错误
       if: env.BUILD_STATUS == 'failed'
       run: |
+        cd ${{ env.KERNEL_SOURCE }}
         echo "=== 编译错误分析 ==="
+        
+        # 确保日志文件存在
+        if [ ! -f "build.log" ]; then
+          echo "❌ build.log 文件不存在"
+          exit 1
+        fi
         
         # 提取前20个错误及其上下文
         echo "=== 主要错误汇总 ===" > error_analysis.log
@@ -132,24 +170,12 @@ jobs:
         echo "=== 错误类型统计 ===" >> error_analysis.log
         grep "error:" build.log | sed 's/.*error: //' | sort | uniq -c | sort -nr | head -10 >> error_analysis.log
         
-        # 显示最常见的错误
-        echo "" >> error_analysis.log
-        echo "=== 建议修复方向 ===" >> error_analysis.log
-        if grep -q "undefined reference" build.log; then
-          echo "🔧 发现链接错误：可能需要添加库依赖或修复函数声明" >> error_analysis.log
-        fi
-        if grep -q "implicit declaration" build.log; then
-          echo "🔧 发现隐式声明警告：需要包含正确的头文件" >> error_analysis.log
-        fi
-        if grep -q "incompatible pointer" build.log; then
-          echo "🔧 发现指针类型不兼容：需要检查函数参数类型" >> error_analysis.log
-        fi
-        
         cat error_analysis.log
 
     - name: 检查生成的文件
       if: env.BUILD_STATUS == 'success'
       run: |
+        cd ${{ env.KERNEL_SOURCE }}
         echo "=== 生成的文件检查 ==="
         find arch/$ARCH/boot/ -type f -ls
         echo "内核大小统计:"
@@ -162,8 +188,8 @@ jobs:
       with:
         name: kernel-build-success
         path: |
-          arch/arm64/boot/
-          .config
+          ${{ env.KERNEL_SOURCE }}/arch/arm64/boot/
+          ${{ env.KERNEL_SOURCE }}/.config
         retention-days: 7
 
     - name: 上传编译日志
@@ -172,13 +198,14 @@ jobs:
       with:
         name: build-logs
         path: |
-          build.log
-          error_analysis.log
+          ${{ env.KERNEL_SOURCE }}/build.log
+          ${{ env.KERNEL_SOURCE }}/error_analysis.log
         retention-days: 7
 
     - name: 生成构建报告
       if: always()
       run: |
+        cd ${{ env.KERNEL_SOURCE }}
         echo "=== 构建报告 ===" > build_report.md
         echo "**构建状态:** $BUILD_STATUS" >> build_report.md
         echo "**错误数量:** $ERROR_COUNT" >> build_report.md
@@ -199,3 +226,11 @@ jobs:
         fi
         
         cat build_report.md
+
+    - name: 上传构建报告
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-report
+        path: ${{ env.KERNEL_SOURCE }}/build_report.md
+        retention-days: 7
