@@ -1,203 +1,201 @@
-name: 编译MT6768内核（修复sed语法版v22）
+name: Build MTK Kernel 4.19 (通用编译)
 
 on:
   workflow_dispatch:
     inputs:
-      config:
-        description: '内核配置文件'
+      defconfig:
+        description: '内核配置文件 (默认为 MT6768 配置)'
         required: true
         default: 'k69v1_64_k419_defconfig'
+      build_target:
+        description: '编译目标'
+        required: true
+        default: 'Image.gz-dtb'
+        type: choice
+        options:
+          - Image.gz-dtb
+          - Image
+          - all
 
 env:
   ARCH: arm64
-  BASE_FIX_VERSION: "21"
+  SUBARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 120
 
     steps:
-    - name: 检出代码
+    - name: 检出内核源码
       uses: actions/checkout@v4
+      with:
+        repository: MediaTek-Labs/common-kernel-4.19
+        ref: main
 
-    - name: 安装依赖
+    - name: 安装编译依赖
       run: |
         sudo apt-get update -y
         sudo apt-get install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
           git wget unzip python3 gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi libncurses-dev dwarves curl file
+          gcc-arm-linux-gnueabi libncurses-dev dwarves curl file \
+          rsync kmod cpio
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         sudo apt-get clean
 
-    - name: 克隆源码并修复（解决sed语法问题）
+    - name: 显示环境信息
       run: |
-        CURRENT_FIX_VERSION=$(( ${BASE_FIX_VERSION} + 1 ))
-        echo "当前修复版本: v${CURRENT_FIX_VERSION}"
-        echo "KERNEL_DIR=$(pwd)/kernel-source" >> $GITHUB_ENV
-        echo "CURRENT_FIX_VERSION=${CURRENT_FIX_VERSION}" >> $GITHUB_ENV
-        
-        git clone --depth=1 --branch=mt6768-4.19 \
-          https://github.com/WUNELEZI1/Gale-Kernel-Source.git \
-          kernel-source
-        cd kernel-source
-        
-        echo "=== 应用最终修复（版本：v${CURRENT_FIX_VERSION}） ==="
-        
-        # -------------------------- 修复1：mt_cpufreq声明重复unsigned问题 --------------------------
-        if [ -f "drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h" ]; then
-          # 修复重复unsigned和参数类型，保持与mtk_cpufreq_api.h一致
-          sed -i '99s/unsigned unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(int id)/unsigned int mt_cpufreq_get_cur_phy_freq_no_lock(unsigned int cluster_id)/' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.h
-        fi
-        
-        # -------------------------- 修复2：uclamp_se_set内联函数问题 --------------------------
-        if [ -f "kernel/sched/sched.h" ]; then
-          sed -i '2370s/inline void uclamp_se_set/void uclamp_se_set/' kernel/sched/sched.h
-          sed -i 's/__always_inline//g' kernel/sched/sched.h
-          sed -i 's/always_inline//g' kernel/sched/sched.h
-        fi
-        
-        # -------------------------- 修复3：ksm_flock内联函数问题 --------------------------
-        if [ -f "include/linux/keyslot-manager.h" ]; then
-          sed -i '101s/inline void ksm_flock/void ksm_flock/' include/linux/keyslot-manager.h
-          sed -i 's/always_inline //g' include/linux/keyslot-manager.h
-        fi
-        
-        # -------------------------- 修复4：blk_crypto_flock内联问题 --------------------------
-        if [ -f "include/linux/blk-crypto.h" ]; then
-          sed -i 's/inline void blk_crypto_flock/void blk_crypto_flock/' include/linux/blk-crypto.h
-        fi
-        
-        # -------------------------- 修复5：枚举修复 --------------------------
-        if [ -f "drivers/power/supply/mediatek/charger/mtk_charger_intf.h" ]; then
-          sed -i '/enum charger_enum {/,/};/d' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
-          sed -i '/enum charger_enum/a enum charger_enum {\n    CHARGER_DEV_NOTIFY_VBUS_OVP,\n    CHARGER_DEV_NOTIFY_EOC,\n    CHARGER_DEV_NOTIFY_RECHG,\n    CHARGER_DEV_NOTIFY_SAFETY_TIMEOUT,\n    CHARGER_DEV_NOTIFY_BAT_OVP\n};' drivers/power/supply/mediatek/charger/mtk_charger_intf.h
-        fi
-        
-        # -------------------------- 修复6：mtk_charger.c修复 --------------------------
-        if [ -f "drivers/power/supply/mediatek/charger/mtk_charger.c" ]; then
-          sed -i '1i#include <linux/of.h>' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '72s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '72s/(const/(struct device *dev, const/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '73s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '205s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '205s/(const/(struct device *dev, const/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '206s/charger_manager/charger_consumer/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '127s/struct of_device_id/__maybe_unused struct of_device_id/' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '128i     { .compatible = "mediatek,mtk-charger" },' drivers/power/supply/mediatek/charger/mtk_charger.c
-          sed -i '129i     {}' drivers/power/supply/mediatek/charger/mtk_charger.c
-        fi
-        
-        # -------------------------- 修复7：mtk_battery.c ret变量声明问题 --------------------------
-        if [ -f "drivers/power/supply/mediatek/battery/mtk_battery.c" ]; then
-          # 使用行号定位，避免特殊字符问题
-          sed -i '4062i         int ret;' drivers/power/supply/mediatek/battery/mtk_battery.c
-          sed -i '4063s/kstrtoint(/ret = kstrtoint(/' drivers/power/supply/mediatek/battery/mtk_battery.c
-          sed -i '4064i         if (ret)' drivers/power/supply/mediatek/battery/mtk_battery.c
-          sed -i '4065i             break;' drivers/power/supply/mediatek/battery/mtk_battery.c
-        fi
-        
-        # -------------------------- 修复8：extcon-mtk-usb.c tval变量问题 --------------------------
-        if [ -f "drivers/misc/mediatek/extcon/extcon-mtk-usb.c" ]; then
-          # 使用行号定位修复
-          sed -i '185i         int ret;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '186i         union power_supply_propval tval;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '187i         ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_TYPE, &tval);' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '188i         if (ret < 0)' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-          sed -i '189i             return;' drivers/misc/mediatek/extcon/extcon-mtk-usb.c
-        fi
-        
-        # -------------------------- 修复9：fw_log_wifi.c copy_to_user返回值处理 --------------------------
-        if [ -f "drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c" ]; then
-          sed -i '234i         int ret;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
-          sed -i '235s/copy_to_user/ret = copy_to_user/' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
-          sed -i '236i         if (ret)' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
-          sed -i '237i             return -EFAULT;' drivers/misc/mediatek/connectivity/wlan/adaptor/fw_log_wifi.c
-        fi
-        
-        # -------------------------- 修复10：ccci修复 --------------------------
-        if [ -f "drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c" ]; then
-          sed -i '257i         char ft_buf[256];' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
-          sed -i '258s/ccci_get_plat_ft_inf/ccci_get_plat_ft_inf(ft_buf, sizeof(ft_buf)) > 0/' drivers/misc/mediatek/ccci_util/ccci_util_lib_sys.c
-        fi
-        
-        # -------------------------- 修复11：camera_dpe.c修复 --------------------------
-        if [ -f "drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c" ]; then
-          sed -i '4708s/$/ {/' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
-          sed -i '4709s/^/    /' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
-          sed -i '4710i }' drivers/misc/mediatek/cameraisp/dpe/mt6768/camera_dpe.c
-        fi
-        
-        # -------------------------- 基础修复 --------------------------
-        sed -i 's/, NULL, NULL//g' mm/huge_memory.c 2>/dev/null
-        sed -i 's/%d bytes/%zu bytes/g' drivers/misc/mediatek/blocktag/blocktag-core.c 2>/dev/null
-        sed -i 's/unsigned int/enum boot_mode_t/g' drivers/input/keyboard/mediatek/mt6768/hal_kpd.c 2>/dev/null
-        sed -i 's/ARRAY_SIZE(count_ack)/sizeof(count_ack)/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c 2>/dev/null
-        sed -i 's/ARRAY_SIZE(count_ack)/sizeof(max_load)/g' drivers/misc/mediatek/base/power/cm_mgr_v1/mtk_cm_mgr.c 2>/dev/null
-        
-        echo "修复完成（版本：v${CURRENT_FIX_VERSION}）"
+        echo "=== 构建环境信息 ==="
+        echo "内核版本: $(make kernelversion 2>/dev/null || echo '未知')"
+        echo "架构: $ARCH"
+        echo "交叉编译器: $CROSS_COMPILE"
+        echo "配置文件: ${{ github.event.inputs.defconfig }}"
+        echo "编译目标: ${{ github.event.inputs.build_target }}"
+        which aarch64-linux-gnu-gcc
+        aarch64-linux-gnu-gcc --version | head -1
 
-    - name: 配置内核
+    - name: 配置内核 (通用方法)
       run: |
-        cd ${{ env.KERNEL_DIR }}
-        rm -rf out && mkdir -p out
+        echo "=== 步骤1: 生成默认配置 ==="
         
-        make O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- ${{ github.event.inputs.config }}
+        # 清理之前的配置
+        make mrproper
         
-        ./scripts/config --file out/.config \
-          --disable DEBUG_INFO --disable GDB_SCRIPTS --disable DEBUG_KERNEL \
-          --disable TRANSPARENT_HUGEPAGE --disable BLK_DEV_CRYPTO \
-          --disable CC_STACKPROTECTOR --disable WERROR \
-          --disable CONFIG_WARN_UNUSED_RESULT --disable CONFIG_WARN_SWITCH_UNREACHABLE
+        # 尝试生成配置
+        echo "使用配置: ${{ github.event.inputs.defconfig }}"
+        if ! make ${{ github.event.inputs.defconfig }}; then
+          echo "❌ 配置生成失败，尝试查找可用配置..."
+          find arch/arm64/configs -name "*defconfig" | head -10
+          exit 1
+        fi
         
-        make O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+        echo "✅ 配置生成成功"
+        
+        # 显示一些关键配置
+        echo "=== 关键配置检查 ==="
+        grep -E "CONFIG_DEBUG_INFO|CONFIG_MODULES|CONFIG_ARM64" .config | head -10
 
-    - name: 编译内核
+    - name: 编译内核 (通用方法)
+      id: compile
       run: |
-        cd ${{ env.KERNEL_DIR }}
-        export ARCH=${{ env.ARCH }}
-        export CROSS_COMPILE=aarch64-linux-gnu-
+        echo "=== 步骤2: 开始编译内核 ==="
+        
         CORES=$(nproc)
-        JOBS=$((CORES + 1))
+        JOBS=$((CORES * 2))
+        echo "使用 $JOBS 个并行任务编译"
         
-        time make O=out -j$JOBS \
-          KCFLAGS="-w -fno-inline-functions" \
-          2>&1 | tee 编译日志.log
+        # 开始编译
+        set +e
+        time make -j$JOBS ${{ github.event.inputs.build_target }} 2>&1 | tee build.log
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        set -e
         
-        if [ -f "out/arch/${{ env.ARCH }}/boot/Image.gz" ] || [ -f "out/arch/${{ env.ARCH }}/boot/Image" ]; then
-          echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
+        # 分析编译结果
+        ERROR_COUNT=$(grep -c "error:" build.log || true)
+        WARNING_COUNT=$(grep -c "warning:" build.log || true)
+        
+        echo "编译退出码: $BUILD_EXIT_CODE"
+        echo "错误数量: $ERROR_COUNT"
+        echo "警告数量: $WARNING_COUNT"
+        
+        # 检查是否生成了内核镜像
+        if [ $BUILD_EXIT_CODE -eq 0 ]; then
+          if [ -f "arch/$ARCH/boot/Image.gz-dtb" ] || [ -f "arch/$ARCH/boot/Image" ]; then
+            echo "BUILD_STATUS=success" >> $GITHUB_ENV
+            echo "✅ 编译成功 - 内核镜像已生成"
+          else
+            echo "BUILD_STATUS=no_image" >> $GITHUB_ENV
+            echo "⚠️ 编译过程成功但未找到内核镜像"
+          fi
         else
-          echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+          echo "BUILD_STATUS=failed" >> $GITHUB_ENV
+          echo "❌ 编译失败"
         fi
+        
+        # 保存统计信息
+        echo "ERROR_COUNT=$ERROR_COUNT" >> $GITHUB_ENV
+        echo "WARNING_COUNT=$WARNING_COUNT" >> $GITHUB_ENV
 
-    - name: 检查结果
+    - name: 分析编译错误
+      if: env.BUILD_STATUS == 'failed'
       run: |
-        cd ${{ env.KERNEL_DIR }}
-        echo "=== 构建结果 ==="
+        echo "=== 编译错误分析 ==="
         
-        echo "=== 编译错误汇总（版本：v${{ env.CURRENT_FIX_VERSION }}） ===" > 错误汇总.log
-        ERROR_COUNT=$(grep -c "error:" 编译日志.log)
-        echo "错误总数：$ERROR_COUNT" >> 错误汇总.log
-        if [ $ERROR_COUNT -gt 0 ]; then
-          grep -A 3 -B 2 "error:" 编译日志.log | sort -u >> 错误汇总.log
-          cat 错误汇总.log
+        # 提取前20个错误及其上下文
+        echo "=== 主要错误汇总 ===" > error_analysis.log
+        grep -A 3 -B 1 "error:" build.log | head -n 80 >> error_analysis.log
+        
+        # 错误分类统计
+        echo "" >> error_analysis.log
+        echo "=== 错误类型统计 ===" >> error_analysis.log
+        grep "error:" build.log | sed 's/.*error: //' | sort | uniq -c | sort -nr | head -10 >> error_analysis.log
+        
+        # 显示最常见的错误
+        echo "" >> error_analysis.log
+        echo "=== 建议修复方向 ===" >> error_analysis.log
+        if grep -q "undefined reference" build.log; then
+          echo "🔧 发现链接错误：可能需要添加库依赖或修复函数声明" >> error_analysis.log
+        fi
+        if grep -q "implicit declaration" build.log; then
+          echo "🔧 发现隐式声明警告：需要包含正确的头文件" >> error_analysis.log
+        fi
+        if grep -q "incompatible pointer" build.log; then
+          echo "🔧 发现指针类型不兼容：需要检查函数参数类型" >> error_analysis.log
         fi
         
-        if [ "${{ env.BUILD_SUCCESS }}" = "true" ]; then
-          echo "✅ 内核镜像生成成功（版本：v${{ env.CURRENT_FIX_VERSION }}）"
-        else
-          echo "❌ 编译失败（版本：v${{ env.CURRENT_FIX_VERSION }}）"
-        fi
+        cat error_analysis.log
 
-    - name: 上传产物
+    - name: 检查生成的文件
+      if: env.BUILD_STATUS == 'success'
+      run: |
+        echo "=== 生成的文件检查 ==="
+        find arch/$ARCH/boot/ -type f -ls
+        echo "内核大小统计:"
+        ls -lh arch/$ARCH/boot/Image* 2>/dev/null || echo "未找到Image文件"
+        ls -lh arch/$ARCH/boot/*.dtb 2>/dev/null || echo "未找到DTB文件"
+
+    - name: 上传构建产物
+      if: env.BUILD_STATUS == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build-success
+        path: |
+          arch/arm64/boot/
+          .config
+        retention-days: 7
+
+    - name: 上传编译日志
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: 内核构建-v${{ env.CURRENT_FIX_VERSION }}-${{ github.run_number }}
+        name: build-logs
         path: |
-          ${{ env.KERNEL_DIR }}/out/arch/${{ env.ARCH }}/boot/
-          ${{ env.KERNEL_DIR }}/编译日志.log
-          ${{ env.KERNEL_DIR }}/错误汇总.log
-          ${{ env.KERNEL_DIR }}/out/.config
-        retention-days: 30
+          build.log
+          error_analysis.log
+        retention-days: 7
+
+    - name: 生成构建报告
+      if: always()
+      run: |
+        echo "=== 构建报告 ===" > build_report.md
+        echo "**构建状态:** $BUILD_STATUS" >> build_report.md
+        echo "**错误数量:** $ERROR_COUNT" >> build_report.md
+        echo "**警告数量:** $WARNING_COUNT" >> build_report.md
+        echo "**配置文件:** ${{ github.event.inputs.defconfig }}" >> build_report.md
+        echo "**编译目标:** ${{ github.event.inputs.build_target }}" >> build_report.md
+        echo "" >> build_report.md
+        
+        if [ "$BUILD_STATUS" = "success" ]; then
+          echo "🎉 **编译成功!**" >> build_report.md
+          echo "生成的内核文件:" >> build_report.md
+          find arch/$ARCH/boot/ -name "Image*" -o -name "*.dtb" | sed 's/^/- /' >> build_report.md
+        elif [ "$BUILD_STATUS" = "failed" ]; then
+          echo "❌ **编译失败**" >> build_report.md
+          echo "" >> build_report.md
+          echo "主要错误类型:" >> build_report.md
+          grep "error:" build.log | sed 's/.*error: //' | sort | uniq -c | sort -nr | head -5 | sed 's/^/- /' >> build_report.md
+        fi
+        
+        cat build_report.md
