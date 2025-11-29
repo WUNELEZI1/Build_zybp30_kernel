@@ -1,4 +1,4 @@
-name: Build MTK Kernel 4.19 (修复版)
+name: Build MT6768 Kernel
 
 on:
   workflow_dispatch:
@@ -6,16 +6,11 @@ on:
       defconfig:
         description: '内核配置文件'
         required: true
-        default: 'k69v1_64_defconfig'
+        default: 'k69v1_64_k419_defconfig'
       build_target:
         description: '编译目标'
         required: true
         default: 'Image.gz-dtb'
-        type: choice
-        options:
-          - Image.gz-dtb
-          - Image
-          - all
 
 env:
   ARCH: arm64
@@ -24,7 +19,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-linux-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
 
     steps:
@@ -34,15 +29,8 @@ jobs:
     - name: 克隆内核源码
       run: |
         echo "=== 克隆内核源码 ==="
-        
-        # 尝试克隆你原来的仓库（这个我们知道可以工作）
-        if git clone --depth=1 --branch=mt6768-4.19 https://github.com/WUNELEZI1/Gale-Kernel-Source.git kernel-source; then
-          echo "✅ 成功克隆内核源码"
-          echo "KERNEL_SOURCE=kernel-source" >> $GITHUB_ENV
-        else
-          echo "❌ 内核源码克隆失败"
-          exit 1
-        fi
+        git clone --depth=1 --branch=mt6768-4.19 https://github.com/WUNELEZI1/Gale-Kernel-Source.git kernel-source
+        echo "KERNEL_SOURCE=kernel-source" >> $GITHUB_ENV
 
     - name: 安装编译依赖
       run: |
@@ -53,158 +41,119 @@ jobs:
           gcc-arm-linux-gnueabi libncurses-dev dwarves curl file \
           rsync kmod cpio
         sudo ln -sf /usr/bin/python3 /usr/bin/python
-        sudo apt-get clean
 
     - name: 显示环境信息
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 构建环境信息 ==="
-        echo "内核目录: $(pwd)"
+        echo "=== 环境信息 ==="
+        echo "工作目录: $(pwd)"
         echo "架构: $ARCH"
-        echo "交叉编译器: $CROSS_COMPILE"
         echo "配置文件: ${{ github.event.inputs.defconfig }}"
-        echo "编译目标: ${{ github.event.inputs.build_target }}"
         
         # 显示可用的配置文件
-        echo "=== 可用的配置文件 ==="
-        find arch/arm64/configs -name "*defconfig" | head -10 || echo "未找到arm64配置文件"
-        find arch/arm/configs -name "*defconfig" | head -5 || echo "未找到arm配置文件"
+        echo "可用的配置:"
+        find arch/arm64/configs -name "*defconfig" | head -10 || echo "无配置"
 
-    - name: 配置内核 (跳过清理)
+    - name: 手动清理和配置
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 配置内核 ==="
+        echo "=== 手动配置 ==="
         
-        # 跳过 mrproper，直接尝试生成配置
-        echo "跳过 make mrproper (避免目录错误)"
+        # 完全跳过 make mrproper，手动清理
+        echo "手动清理配置..."
+        rm -f .config .config.old
         
-        # 尝试生成配置
+        # 直接配置内核
         echo "使用配置: ${{ github.event.inputs.defconfig }}"
-        if ! make ${{ github.event.inputs.defconfig }}; then
-          echo "❌ 指定配置失败，尝试查找可用配置..."
-          
-          # 尝试一些常见的配置
-          for config in "k69v1_64_defconfig" "defconfig" "mediatek_defconfig"; do
-            echo "尝试配置: $config"
-            if make $config; then
-              echo "✅ 使用配置: $config"
-              break
-            fi
-          done
+        if make ${{ github.event.inputs.defconfig }}; then
+          echo "✅ 配置成功"
         else
-          echo "✅ 配置生成成功"
-        fi
-        
-        # 显示配置摘要
-        echo "=== 配置摘要 ==="
-        if [ -f ".config" ]; then
-          grep -E "CONFIG_ARM64|CONFIG_CPU|CONFIG_MTK|CONFIG_ARCH" .config | head -10
-        else
-          echo "❌ 没有生成 .config 文件"
-          exit 1
+          echo "❌ 配置失败，尝试默认配置"
+          if ! make defconfig; then
+            echo "⚠️ 使用最小配置"
+            echo "CONFIG_ARM64=y" > .config
+            make olddefconfig
+          fi
         fi
 
     - name: 编译内核
-      id: compile
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 开始编译内核 ==="
+        echo "=== 开始编译 ==="
         
         CORES=$(nproc)
-        JOBS=$((CORES + 1))  # 使用 nproc + 1 更安全
-        echo "使用 $JOBS 个并行任务编译"
+        JOBS=$((CORES + 1))
+        echo "使用 $JOBS 个任务编译"
         
         # 创建日志文件
         touch build.log
-        touch error_analysis.log
         
         # 开始编译
         set +e
-        {
-          time make -j$JOBS ${{ github.event.inputs.build_target }} 2>&1
-        } | tee build.log
+        time make -j$JOBS ${{ github.event.inputs.build_target }} 2>&1 | tee build.log
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
-        # 分析编译结果
+        # 分析结果
         ERROR_COUNT=$(grep -c "error:" build.log || true)
         WARNING_COUNT=$(grep -c "warning:" build.log || true)
         
-        echo "编译退出码: $BUILD_EXIT_CODE"
-        echo "错误数量: $ERROR_COUNT"
-        echo "警告数量: $WARNING_COUNT"
+        echo "退出码: $BUILD_EXIT_CODE"
+        echo "错误: $ERROR_COUNT"
+        echo "警告: $WARNING_COUNT"
         
-        # 检查是否生成了内核镜像
-        if [ $BUILD_EXIT_CODE -eq 0 ]; then
-          if ls arch/$ARCH/boot/Image* 1> /dev/null 2>&1; then
-            echo "BUILD_STATUS=success" >> $GITHUB_ENV
-            echo "✅ 编译成功 - 内核镜像已生成"
-          else
-            echo "BUILD_STATUS=no_image" >> $GITHUB_ENV
-            echo "⚠️ 编译过程成功但未找到内核镜像"
-          fi
+        # 检查结果
+        if [ $BUILD_EXIT_CODE -eq 0 ] && [ -f "arch/$ARCH/boot/Image.gz-dtb" ]; then
+          echo "BUILD_STATUS=success" >> $GITHUB_ENV
+          echo "✅ 编译成功"
         else
           echo "BUILD_STATUS=failed" >> $GITHUB_ENV
           echo "❌ 编译失败"
         fi
         
-        # 保存统计信息
         echo "ERROR_COUNT=$ERROR_COUNT" >> $GITHUB_ENV
-        echo "WARNING_COUNT=$WARNING_COUNT" >> $GITHUB_ENV
-        
-        # 生成错误分析
-        if [ $ERROR_COUNT -gt 0 ]; then
-          echo "=== 错误分析 ===" > error_analysis.log
-          grep -A 2 -B 1 "error:" build.log | head -n 50 >> error_analysis.log
-          echo "... (更多错误请查看完整日志)" >> error_analysis.log
-        fi
 
-    - name: 检查生成的文件
-      if: env.BUILD_STATUS == 'success'
+    - name: 生成错误报告
+      if: env.BUILD_STATUS == 'failed'
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 生成的文件 ==="
-        find arch/$ARCH/boot/ -type f -exec ls -lh {} \;
-        echo "=== 文件大小 ==="
-        du -sh arch/$ARCH/boot/* || echo "无法获取文件大小"
+        echo "=== 错误报告 ===" > errors.txt
+        grep -A 2 -B 1 "error:" build.log | head -30 >> errors.txt
+        echo "=== 完整日志已保存 ===" >> errors.txt
+        cat errors.txt
 
-    - name: 上传构建产物
+    - name: 上传产物
       if: env.BUILD_STATUS == 'success'
       uses: actions/upload-artifact@v4
       with:
         name: kernel-images
-        path: |
-          ${{ env.KERNEL_SOURCE }}/arch/arm64/boot/
-        retention-days: 7
+        path: ${{ env.KERNEL_SOURCE }}/arch/arm64/boot/
 
-    - name: 上传编译日志和配置
+    - name: 上传日志
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-artifacts
+        name: build-logs
         path: |
-          ${{ env.KERNEL_SOURCE }}/.config
           ${{ env.KERNEL_SOURCE }}/build.log
-          ${{ env.KERNEL_SOURCE }}/error_analysis.log
-        retention-days: 7
+          ${{ env.KERNEL_SOURCE }}/errors.txt
+          ${{ env.KERNEL_SOURCE }}/.config
 
-    - name: 显示构建总结
+    - name: 显示结果
       if: always()
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 构建总结 ==="
+        echo "=== 最终结果 ==="
         echo "状态: $BUILD_STATUS"
         echo "错误: $ERROR_COUNT"
-        echo "警告: $WARNING_COUNT"
         
         if [ "$BUILD_STATUS" = "success" ]; then
-          echo "🎉 编译成功!"
-          echo "生成的文件:"
-          ls -la arch/$ARCH/boot/
+          echo "🎉 成功!"
+          ls -la arch/arm64/boot/
         else
-          echo "❌ 编译失败"
-          if [ -f "error_analysis.log" ]; then
-            echo "前几个错误:"
-            head -20 error_analysis.log
+          echo "❌ 失败"
+          if [ -f "errors.txt" ]; then
+            echo "主要错误:"
+            head -10 errors.txt
           fi
         fi

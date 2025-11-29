@@ -1,6 +1,10 @@
 {
   "ExpandedNodes": [
-    ""
+    "",
+    "\\.github",
+    "\\.github\\scripts",
+    "\\.github\\workflows"
   ],
+  "SelectedNode": "\\.github\\workflows\\kernel-build.yml",
   "PreviewInSolutionExplorer": false
 }
