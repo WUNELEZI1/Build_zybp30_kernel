@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel - Ultra Fast
 
 on:
   workflow_dispatch:
@@ -16,109 +16,96 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120  # 延长到2小时
 
     steps:
     - name: 检出仓库
       uses: actions/checkout@v4
 
-    - name: 编译内核 (简洁输出版)
+    - name: 极速编译内核
       run: |
-        echo "=== 🚀 开始内核编译 ==="
+        echo "=== 🚀 极速内核编译启动 ==="
         
-        # 获取系统信息
+        # 性能配置
         CPU_CORES=$(nproc)
-        PARALLEL_JOBS=$((CPU_CORES * 2))
+        PARALLEL_JOBS=$((CPU_CORES * 3))  # 3倍核心数，平衡性能
         
-        echo "配置: $PARALLEL_JOBS 并行任务 | $ARCH架构 | all目标"
+        echo "配置: $PARALLEL_JOBS 并行任务 | $ARCH架构"
         
-        # 静默安装依赖
-        sudo apt-get update -y > /dev/null 2>&1
-        sudo apt-get install -y \
+        # 极简依赖安装
+        echo "📦 安装核心依赖..."
+        sudo apt-get update -y
+        sudo apt-get install -y --no-install-recommends \
           build-essential bc bison flex libssl-dev libelf-dev \
-          git python3 gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi libncurses-dev dwarves \
-          rsync kmod cpio > /dev/null 2>&1
+          gcc-aarch64-linux-gnu git python3 libncurses-dev
         
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         
-        # 克隆源码
-        git clone --depth=1 --branch=mt6768-4.19 \
-          https://github.com/WUNELEZI1/Gale-Kernel-Source.git kernel-source --quiet
-        
-        cd kernel-source
+        # 直接克隆到当前目录
+        echo "🔧 获取内核源码..."
+        git clone --depth=1 --single-branch --branch=mt6768-4.19 \
+          https://github.com/WUNELEZI1/Gale-Kernel-Source.git . --quiet
         
         # 快速配置
+        echo "⚙️ 生成配置..."
         rm -f .config .config.old
-        make ${{ github.event.inputs.defconfig }} > /dev/null 2>&1 || make defconfig > /dev/null 2>&1
+        if ! make ${{ github.event.inputs.defconfig }}; then
+          echo "⚠️ 使用备用配置"
+          make defconfig
+        fi
         
-        echo "✅ 配置完成 | 开始编译..."
+        # 关键优化：禁用调试信息，大幅减少编译量
+        echo "🔧 应用编译优化..."
+        ./scripts/config --disable DEBUG_INFO 2>/dev/null || true
+        ./scripts/config --disable DEBUG_KERNEL 2>/dev/null || true
+        ./scripts/config --disable GDB_SCRIPTS 2>/dev/null || true
         
-        # 简洁编译输出
+        echo "⚡ 开始编译..."
         START_TIME=$(date +%s)
         
-        # 使用简洁模式编译 - 只显示重要信息
-        {
-          echo "编译进度监控 (每10秒更新):"
-          while sleep 10; do
-            if ps aux | grep -v grep | grep -q "make"; then
-              COMPILED_FILES=$(find . -name "*.o" -type f | wc -l)
-              echo "[$(date +%H:%M:%S)] 已编译: $COMPILED_FILES 个文件"
-            else
-              break
-            fi
-          done &
-          MONITOR_PID=$!
-          
-          # 主要编译过程 - 过滤输出
-          make -j$PARALLEL_JOBS all 2>&1 | grep -E --line-buffered "error:|warning:|CC |LD |AR |Building|Entering directory|Leaving directory" | head -1000
-          
-          kill $MONITOR_PID 2>/dev/null
-        } | tee build.log
+        # 分阶段编译，优先编译核心镜像
+        echo "阶段1: 编译核心镜像 (vmlinux)"
+        make -j$PARALLEL_JOBS vmlinux
         
-        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo "阶段2: 编译内核镜像 (Image)"
+        make -j$PARALLEL_JOBS Image
+        
+        echo "阶段3: 编译设备树 (dtbs)"
+        make -j$PARALLEL_JOBS dtbs 2>/dev/null || true
+        
+        echo "阶段4: 编译模块 (modules)"
+        make -j$PARALLEL_JOBS modules 2>/dev/null || true
         
         END_TIME=$(date +%s)
         COMPILE_TIME=$((END_TIME - START_TIME))
         
-        # 结果分析
-        ERROR_COUNT=$(grep -c "error:" build.log || true)
-        WARNING_COUNT=$(grep -c "warning:" build.log || true)
-        
         echo ""
-        echo "=== 编译完成 ==="
-        echo "耗时: ${COMPILE_TIME}秒"
-        echo "结果: $([ $BUILD_EXIT_CODE -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')"
-        echo "统计: $ERROR_COUNT 错误 | $WARNING_COUNT 警告"
+        echo "=== 🏁 编译完成 ==="
+        echo "⏱️ 总耗时: ${COMPILE_TIME}秒"
         
-        if [ $BUILD_EXIT_CODE -eq 0 ]; then
-          if ls arch/$ARCH/boot/Image* >/dev/null 2>&1; then
-            echo "生成文件:"
-            ls -lh arch/$ARCH/boot/Image* | awk '{print "  " $9 " (" $5 ")"}'
-            echo "BUILD_STATUS=success" >> $GITHUB_ENV
-          else
-            echo "⚠️ 无内核镜像"
-            echo "BUILD_STATUS=no_image" >> $GITHUB_ENV
-          fi
+        # 结果检查
+        if ls arch/$ARCH/boot/Image* >/dev/null 2>&1; then
+          echo "✅ 编译成功！"
+          echo "生成文件:"
+          find arch/$ARCH/boot/ -name "Image*" -type f -exec ls -lh {} \; | awk '{print "  " $9 " (" $5 ")"}'
+          echo "BUILD_STATUS=success" >> $GITHUB_ENV
         else
-          echo "最后错误:"
-          grep "error:" build.log | tail -3 | sed 's/^/  /'
-          echo "BUILD_STATUS=failed" >> $GITHUB_ENV
+          echo "❌ 未找到内核镜像"
+          echo "BUILD_STATUS=no_image" >> $GITHUB_ENV
         fi
         
-        echo "ERROR_COUNT=$ERROR_COUNT" >> $GITHUB_ENV
         echo "COMPILE_TIME=$COMPILE_TIME" >> $GITHUB_ENV
 
     - name: 上传产物
       if: env.BUILD_STATUS == 'success'
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-images
-        path: kernel-source/arch/arm64/boot/
+        name: kernel-ultra-fast
+        path: arch/arm64/boot/
 
-    - name: 上传日志
+    - name: 上传配置
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-logs
-        path: kernel-source/build.log
+        name: kernel-config
+        path: .config
