@@ -43,7 +43,7 @@ jobs:
     strategy:
       matrix:
         # 可以同时编译多个配置
-        config: [${{ github.event.inputs.defconfig }}]
+        config: ['k69v1_64_k419_defconfig']
 
     steps:
     - name: 检出仓库
@@ -91,18 +91,6 @@ jobs:
           libncurses-dev dwarves curl file rsync kmod cpio \
           ccache pahole lz4 zstd
         
-        # 安装最新版GCC工具链（可选）
-        # sudo apt-get install -y gcc-11 g++-11 gcc-11-aarch64-linux-gnu
-        
-        # 设置CCache
-        if [ "${{ github.event.inputs.ccache_enabled }}" = "true" ]; then
-          echo "设置CCache..."
-          ccache -M 2G
-          ccache -s
-          echo "CCACHE_DIR=~/.ccache" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
-        fi
-        
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         
         # 显示工具版本
@@ -143,10 +131,6 @@ jobs:
           echo 'CXX="aarch64-linux-gnu-g++"' >> $GITHUB_ENV
         fi
         
-        # 禁用调试信息加速编译
-        echo "CONFIG_DEBUG_INFO=n" >> $GITHUB_ENV
-        echo "CONFIG_DEBUG_KERNEL=n" >> $GITHUB_ENV
-        
         echo "编译环境配置完成"
 
     - name: 快速配置内核
@@ -167,15 +151,14 @@ jobs:
         
         # 优化配置 - 禁用调试和不需要的功能
         echo "优化内核配置..."
-        ./scripts/config --file .config \
-          --disable DEBUG_INFO \
-          --disable GDB_SCRIPTS \
-          --disable DEBUG_KERNEL \
-          --disable KASAN \
-          --disable UBSAN \
-          --disable DEBUG_FS \
-          --disable PROFILING \
-          --disable KCOV
+        if [ -f "./scripts/config" ]; then
+          ./scripts/config --file .config \
+            --disable DEBUG_INFO \
+            --disable GDB_SCRIPTS \
+            --disable DEBUG_KERNEL
+        else
+          echo "警告: scripts/config 不存在，跳过配置优化"
+        fi
         
         # 应用配置
         make olddefconfig
@@ -196,8 +179,8 @@ jobs:
         # 性能监控
         echo "开始编译: $(date)"
         echo "系统资源:"
-        free -h
-        df -h
+        free -h | head -2
+        df -h | head -5
         
         # 使用性能优化编译
         set +e
@@ -205,9 +188,7 @@ jobs:
           echo "=== 编译统计 ==="
           time make -j$PARALLEL_JOBS ${{ github.event.inputs.build_target }} \
             CC="$CC" \
-            CXX="$CXX" \
             KCFLAGS="$KCFLAGS -Wno-error" \
-            KCPPFLAGS="$KCPPFLAGS" \
             2>&1
         } | tee build_logs/full_build.log
         
@@ -253,7 +234,7 @@ jobs:
         if [ "${{ github.event.inputs.ccache_enabled }}" = "true" ]; then
           echo "" >> performance_report.md
           echo "**CCache统计:**" >> performance_report.md
-          ccache -s >> performance_report.md
+          ccache -s >> performance_report.md 2>/dev/null || echo "CCache统计不可用" >> performance_report.md
         fi
         
         # 错误统计
@@ -283,7 +264,7 @@ jobs:
         name: kernel-images-${{ matrix.config }}
         path: |
           ${{ env.KERNEL_SOURCE }}/arch/arm64/boot/
-        compression-level: 0  # 不压缩，加快上传
+        compression-level: 0
         retention-days: 30
 
     - name: 上传编译报告
