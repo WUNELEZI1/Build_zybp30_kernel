@@ -1,4 +1,4 @@
-name: Build MT6768 Kernel
+name: 🚀 MT6768 内核编译 (性能优化版)
 
 on:
   workflow_dispatch:
@@ -11,99 +11,224 @@ on:
         description: '编译目标'
         required: true
         default: 'Image.gz-dtb'
+        type: choice
+        options:
+          - Image.gz-dtb
+          - Image
+          - all
+      ccache_enabled:
+        description: '启用CCache缓存'
+        required: true
+        default: true
+        type: boolean
+      parallel_jobs:
+        description: '并行任务数 (0=自动)'
+        required: true
+        default: 0
+        type: number
 
 env:
   ARCH: arm64
   SUBARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
+  # 性能优化环境变量
+  KCFLAGS: "-O2 -pipe -fno-semantic-interposition -fno-trapping-math"
+  KCPPFLAGS: "-O2"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
+
+    strategy:
+      matrix:
+        # 可以同时编译多个配置
+        config: [${{ github.event.inputs.defconfig }}]
 
     steps:
-    - name: 检出当前仓库
+    - name: 检出仓库
       uses: actions/checkout@v4
+
+    - name: 设置编译环境
+      run: |
+        # 设置CPU优化标志
+        CPU_CORES=$(nproc)
+        echo "CPU核心数: $CPU_CORES"
+        
+        # 计算最优并行任务数
+        if [ "${{ github.event.inputs.parallel_jobs }}" -eq 0 ]; then
+          PARALLEL_JOBS=$((CPU_CORES * 2))
+        else
+          PARALLEL_JOBS=${{ github.event.inputs.parallel_jobs }}
+        fi
+        echo "PARALLEL_JOBS=$PARALLEL_JOBS" >> $GITHUB_ENV
+        echo "使用并行任务数: $PARALLEL_JOBS"
+        
+        # 设置编译优化
+        echo "MAKEFLAGS=-j$PARALLEL_JOBS" >> $GITHUB_ENV
+
+    - name: 缓存CCache
+      if: github.event.inputs.ccache_enabled == 'true'
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.ccache
+          ccache
+        key: ${{ runner.os }}-ccache-${{ hashFiles('**/.ccache/**') }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-
+
+    - name: 安装高性能工具链
+      run: |
+        echo "=== 安装优化工具链 ==="
+        sudo apt-get update -y
+        
+        # 基础编译工具
+        sudo apt-get install -y \
+          build-essential bc bison flex libssl-dev libelf-dev \
+          git wget unzip python3 python3-pip \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          libncurses-dev dwarves curl file rsync kmod cpio \
+          ccache pahole lz4 zstd
+        
+        # 安装最新版GCC工具链（可选）
+        # sudo apt-get install -y gcc-11 g++-11 gcc-11-aarch64-linux-gnu
+        
+        # 设置CCache
+        if [ "${{ github.event.inputs.ccache_enabled }}" = "true" ]; then
+          echo "设置CCache..."
+          ccache -M 2G
+          ccache -s
+          echo "CCACHE_DIR=~/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
+        fi
+        
+        sudo ln -sf /usr/bin/python3 /usr/bin/python
+        
+        # 显示工具版本
+        echo "=== 工具版本 ==="
+        aarch64-linux-gnu-gcc --version | head -1
+        ccache --version | head -1
+        make --version | head -1
 
     - name: 克隆内核源码
       run: |
         echo "=== 克隆内核源码 ==="
-        git clone --depth=1 --branch=mt6768-4.19 https://github.com/WUNELEZI1/Gale-Kernel-Source.git kernel-source
-        echo "KERNEL_SOURCE=kernel-source" >> $GITHUB_ENV
-
-    - name: 安装编译依赖
-      run: |
-        sudo apt-get update -y
-        sudo apt-get install -y \
-          build-essential bc bison flex libssl-dev libelf-dev \
-          git wget unzip python3 gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi libncurses-dev dwarves curl file \
-          rsync kmod cpio
-        sudo ln -sf /usr/bin/python3 /usr/bin/python
-
-    - name: 显示环境信息
-      run: |
-        cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 环境信息 ==="
-        echo "工作目录: $(pwd)"
-        echo "架构: $ARCH"
-        echo "配置文件: ${{ github.event.inputs.defconfig }}"
         
-        # 显示可用的配置文件
-        echo "可用的配置:"
-        find arch/arm64/configs -name "*defconfig" | head -10 || echo "无配置"
-
-    - name: 手动清理和配置
-      run: |
-        cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 手动配置 ==="
+        # 使用并行克隆加速
+        git config --global core.preloadIndex true
+        git config --global core.fscache true
+        git config --global gc.auto 256
         
-        # 完全跳过 make mrproper，手动清理
-        echo "手动清理配置..."
-        rm -f .config .config.old
-        
-        # 直接配置内核
-        echo "使用配置: ${{ github.event.inputs.defconfig }}"
-        if make ${{ github.event.inputs.defconfig }}; then
-          echo "✅ 配置成功"
+        if git clone --depth=1 --branch=mt6768-4.19 --jobs=4 \
+          https://github.com/WUNELEZI1/Gale-Kernel-Source.git kernel-source; then
+          echo "✅ 源码克隆成功"
+          echo "KERNEL_SOURCE=kernel-source" >> $GITHUB_ENV
         else
-          echo "❌ 配置失败，尝试默认配置"
-          if ! make defconfig; then
-            echo "⚠️ 使用最小配置"
-            echo "CONFIG_ARM64=y" > .config
-            make olddefconfig
-          fi
+          echo "❌ 克隆失败"
+          exit 1
         fi
 
-    - name: 编译内核
+    - name: 配置编译环境
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 开始编译 ==="
+        echo "=== 配置编译环境 ==="
         
-        CORES=$(nproc)
-        JOBS=$((CORES + 1))
-        echo "使用 $JOBS 个任务编译"
+        # 设置性能优化参数
+        if [ "${{ github.event.inputs.ccache_enabled }}" = "true" ]; then
+          echo 'CC="ccache aarch64-linux-gnu-gcc"' >> $GITHUB_ENV
+          echo 'CXX="ccache aarch64-linux-gnu-g++"' >> $GITHUB_ENV
+        else
+          echo 'CC="aarch64-linux-gnu-gcc"' >> $GITHUB_ENV
+          echo 'CXX="aarch64-linux-gnu-g++"' >> $GITHUB_ENV
+        fi
         
-        # 创建日志文件
-        touch build.log
+        # 禁用调试信息加速编译
+        echo "CONFIG_DEBUG_INFO=n" >> $GITHUB_ENV
+        echo "CONFIG_DEBUG_KERNEL=n" >> $GITHUB_ENV
         
-        # 开始编译
+        echo "编译环境配置完成"
+
+    - name: 快速配置内核
+      run: |
+        cd ${{ env.KERNEL_SOURCE }}
+        echo "=== 快速内核配置 ==="
+        
+        # 跳过清理，直接配置
+        echo "跳过 make mrproper"
+        rm -f .config .config.old
+        
+        # 快速配置
+        echo "使用配置: ${{ matrix.config }}"
+        if ! make ${{ matrix.config }}; then
+          echo "❌ 配置失败，尝试默认配置"
+          make defconfig || make allyesconfig
+        fi
+        
+        # 优化配置 - 禁用调试和不需要的功能
+        echo "优化内核配置..."
+        ./scripts/config --file .config \
+          --disable DEBUG_INFO \
+          --disable GDB_SCRIPTS \
+          --disable DEBUG_KERNEL \
+          --disable KASAN \
+          --disable UBSAN \
+          --disable DEBUG_FS \
+          --disable PROFILING \
+          --disable KCOV
+        
+        # 应用配置
+        make olddefconfig
+        
+        echo "✅ 配置完成"
+
+    - name: 编译内核 (性能优化)
+      run: |
+        cd ${{ env.KERNEL_SOURCE }}
+        echo "=== 开始高性能编译 ==="
+        
+        # 创建编译目录
+        mkdir -p build_logs
+        
+        # 设置编译开始时间
+        START_TIME=$(date +%s)
+        
+        # 性能监控
+        echo "开始编译: $(date)"
+        echo "系统资源:"
+        free -h
+        df -h
+        
+        # 使用性能优化编译
         set +e
-        time make -j$JOBS ${{ github.event.inputs.build_target }} 2>&1 | tee build.log
+        {
+          echo "=== 编译统计 ==="
+          time make -j$PARALLEL_JOBS ${{ github.event.inputs.build_target }} \
+            CC="$CC" \
+            CXX="$CXX" \
+            KCFLAGS="$KCFLAGS -Wno-error" \
+            KCPPFLAGS="$KCPPFLAGS" \
+            2>&1
+        } | tee build_logs/full_build.log
+        
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
-        # 分析结果
-        ERROR_COUNT=$(grep -c "error:" build.log || true)
-        WARNING_COUNT=$(grep -c "warning:" build.log || true)
+        # 计算编译时间
+        END_TIME=$(date +%s)
+        COMPILE_TIME=$((END_TIME - START_TIME))
+        echo "COMPILE_TIME=$COMPILE_TIME" >> $GITHUB_ENV
         
-        echo "退出码: $BUILD_EXIT_CODE"
-        echo "错误: $ERROR_COUNT"
-        echo "警告: $WARNING_COUNT"
+        # 分析结果
+        ERROR_COUNT=$(grep -c "error:" build_logs/full_build.log || true)
+        WARNING_COUNT=$(grep -c "warning:" build_logs/full_build.log || true)
+        
+        echo "编译时间: ${COMPILE_TIME}秒"
+        echo "错误数量: $ERROR_COUNT"
+        echo "警告数量: $WARNING_COUNT"
         
         # 检查结果
-        if [ $BUILD_EXIT_CODE -eq 0 ] && [ -f "arch/$ARCH/boot/Image.gz-dtb" ]; then
+        if [ $BUILD_EXIT_CODE -eq 0 ] && ls arch/$ARCH/boot/Image* >/dev/null 2>&1; then
           echo "BUILD_STATUS=success" >> $GITHUB_ENV
           echo "✅ 编译成功"
         else
@@ -113,47 +238,77 @@ jobs:
         
         echo "ERROR_COUNT=$ERROR_COUNT" >> $GITHUB_ENV
 
-    - name: 生成错误报告
-      if: env.BUILD_STATUS == 'failed'
+    - name: 性能分析和报告
+      if: always()
       run: |
         cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 错误报告 ===" > errors.txt
-        grep -A 2 -B 1 "error:" build.log | head -30 >> errors.txt
-        echo "=== 完整日志已保存 ===" >> errors.txt
-        cat errors.txt
+        echo "=== 性能分析报告 ===" > performance_report.md
+        
+        # 编译时间统计
+        echo "**编译时间:** ${COMPILE_TIME}秒" >> performance_report.md
+        echo "**并行任务:** $PARALLEL_JOBS" >> performance_report.md
+        echo "**CCache状态:** ${{ github.event.inputs.ccache_enabled }}" >> performance_report.md
+        
+        # CCache统计
+        if [ "${{ github.event.inputs.ccache_enabled }}" = "true" ]; then
+          echo "" >> performance_report.md
+          echo "**CCache统计:**" >> performance_report.md
+          ccache -s >> performance_report.md
+        fi
+        
+        # 错误统计
+        echo "" >> performance_report.md
+        echo "**编译统计:**" >> performance_report.md
+        echo "- 错误: $ERROR_COUNT" >> performance_report.md
+        echo "- 警告: $WARNING_COUNT" >> performance_report.md
+        
+        # 生成文件信息
+        if [ "$BUILD_STATUS" = "success" ]; then
+          echo "" >> performance_report.md
+          echo "**生成文件:**" >> performance_report.md
+          for file in arch/$ARCH/boot/Image*; do
+            if [ -f "$file" ]; then
+              size=$(du -h "$file" | cut -f1)
+              echo "- $(basename "$file") ($size)" >> performance_report.md
+            fi
+          done
+        fi
+        
+        cat performance_report.md
 
-    - name: 上传产物
+    - name: 上传内核镜像
       if: env.BUILD_STATUS == 'success'
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-images
-        path: ${{ env.KERNEL_SOURCE }}/arch/arm64/boot/
+        name: kernel-images-${{ matrix.config }}
+        path: |
+          ${{ env.KERNEL_SOURCE }}/arch/arm64/boot/
+        compression-level: 0  # 不压缩，加快上传
+        retention-days: 30
 
-    - name: 上传日志
+    - name: 上传编译报告
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-logs
+        name: build-reports-${{ matrix.config }}
         path: |
-          ${{ env.KERNEL_SOURCE }}/build.log
-          ${{ env.KERNEL_SOURCE }}/errors.txt
+          ${{ env.KERNEL_SOURCE }}/build_logs/
+          ${{ env.KERNEL_SOURCE }}/performance_report.md
           ${{ env.KERNEL_SOURCE }}/.config
+        retention-days: 7
 
-    - name: 显示结果
+    - name: 显示优化结果
       if: always()
       run: |
-        cd ${{ env.KERNEL_SOURCE }}
-        echo "=== 最终结果 ==="
+        echo "=== 🚀 编译优化结果 ==="
         echo "状态: $BUILD_STATUS"
-        echo "错误: $ERROR_COUNT"
+        echo "时间: ${COMPILE_TIME}秒"
+        echo "配置: ${{ matrix.config }}"
+        echo "并行: $PARALLEL_JOBS 任务"
+        echo "CCache: ${{ github.event.inputs.ccache_enabled }}"
         
         if [ "$BUILD_STATUS" = "success" ]; then
-          echo "🎉 成功!"
-          ls -la arch/arm64/boot/
+          echo "🎉 高性能编译完成!"
         else
-          echo "❌ 失败"
-          if [ -f "errors.txt" ]; then
-            echo "主要错误:"
-            head -10 errors.txt
-          fi
+          echo "❌ 编译失败，请检查日志"
         fi
