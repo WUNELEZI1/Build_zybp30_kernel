@@ -7,15 +7,6 @@ on:
         description: '内核配置文件'
         required: true
         default: 'k69v1_64_k419_defconfig'
-      kernel_branch:
-        description: '内核分支'
-        required: true
-        default: 'master'
-        type: choice
-        options:
-          - master
-          - kernel-4.19
-          - kernel-4.14
 
 env:
   ARCH: arm64
@@ -41,22 +32,25 @@ jobs:
         
         echo "配置: $PARALLEL_JOBS 并行任务 | $ARCH架构"
         echo "源码: MediaTek-Labs/common-kernel-4.19"
-        echo "分支: ${{ github.event.inputs.kernel_branch }}"
         
-        # 安装依赖
-        echo "📦 安装编译工具..."
+        # 安装依赖 - 使用 GCC 9 工具链以兼容内核 4.19
+        echo "📦 安装编译工具 (GCC 9)..."
         sudo apt-get update -y
         sudo apt-get install -y --no-install-recommends \
           build-essential bc bison flex libssl-dev libelf-dev \
-          gcc-aarch64-linux-gnu git python3 libncurses-dev \
+          gcc-9-aarch64-linux-gnu g++-9-aarch64-linux-gnu git python3 libncurses-dev \
           dwarves rsync kmod cpio
         
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         
-        # 克隆官方内核源码
+        # 设置使用 GCC 9 工具链
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=aarch64-linux-gnu-gcc-9
+        export CXX=aarch64-linux-gnu-g++-9
+        
+        # 克隆官方内核源码 (只克隆 master 分支)
         echo "🔧 获取 MediaTek 官方内核源码..."
-        git clone --depth=1 --single-branch --branch=${{ github.event.inputs.kernel_branch }} \
-          https://github.com/MediaTek-Labs/common-kernel-4.19.git kernel-source --quiet
+        git clone --depth=1 https://github.com/MediaTek-Labs/common-kernel-4.19.git kernel-source --quiet
         
         cd kernel-source
         
@@ -72,17 +66,10 @@ jobs:
           make defconfig
         fi
         
-        # 优化配置（可选）
-        echo "🔧 优化配置..."
-        {
-          echo "# 编译优化"
-          echo "CONFIG_DEBUG_INFO=n"
-          echo "CONFIG_DEBUG_KERNEL=n"
-          echo "CONFIG_GDB_SCRIPTS=n"
-        } >> .config
-        
-        # 重新生成配置
-        yes "" | make oldconfig > /dev/null 2>&1
+        # 优化配置（可选）- 禁用调试信息加速编译
+        echo "🔧 应用编译优化..."
+        sed -i 's/CONFIG_DEBUG_INFO=y/CONFIG_DEBUG_INFO=n/' .config 2>/dev/null || true
+        sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/' .config 2>/dev/null || true
         
         # 开始编译
         echo "⚡ 开始编译..."
@@ -166,14 +153,6 @@ jobs:
         path: |
           kernel-source/arch/arm64/boot/
           kernel-source/.config
-        retention-days: 7
-
-    - name: 上传模块（如果存在）
-      if: env.BUILD_STATUS == 'success'
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-modules
-        path: kernel-source/modules.tar.gz
         retention-days: 7
 
     - name: 打包模块
