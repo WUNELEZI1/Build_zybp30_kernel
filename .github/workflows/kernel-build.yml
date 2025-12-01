@@ -48,6 +48,12 @@ jobs:
         export CC=aarch64-linux-gnu-gcc-9
         export CXX=aarch64-linux-gnu-g++-9
         
+        # 关键修复：为 GCC 9 工具链创建无版本号符号链接
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc-9 /usr/bin/aarch64-linux-gnu-gcc
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-g++-9 /usr/bin/aarch64-linux-gnu-g++
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-cpp-9 /usr/bin/aarch64-linux-gnu-cpp
+        echo "✅ 已创建 GCC 9 工具链符号链接"
+        
         # 克隆官方内核源码 (只克隆 master 分支)
         echo "🔧 获取 MediaTek 官方内核源码..."
         git clone --depth=1 https://github.com/MediaTek-Labs/common-kernel-4.19.git kernel-source --quiet
