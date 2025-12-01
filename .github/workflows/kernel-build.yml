@@ -1,4 +1,4 @@
-name: Build Kernel - Fixed Version
+name: Build MediaTek Kernel
 
 on:
   workflow_dispatch:
@@ -7,6 +7,15 @@ on:
         description: '内核配置文件'
         required: true
         default: 'k69v1_64_k419_defconfig'
+      kernel_branch:
+        description: '内核分支'
+        required: true
+        default: 'master'
+        type: choice
+        options:
+          - master
+          - kernel-4.19
+          - kernel-4.14
 
 env:
   ARCH: arm64
@@ -16,81 +25,103 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
     - name: 检出仓库
       uses: actions/checkout@v4
 
-    - name: 修复编译内核
+    - name: 编译 MediaTek 官方内核
       run: |
-        echo "=== 🚀 修复编译内核启动 ==="
+        echo "=== 🚀 编译 MediaTek 官方内核 ==="
         
         # 性能配置
         CPU_CORES=$(nproc)
-        PARALLEL_JOBS=$((CPU_CORES * 3))
+        PARALLEL_JOBS=$((CPU_CORES * 2))
         
         echo "配置: $PARALLEL_JOBS 并行任务 | $ARCH架构"
+        echo "源码: MediaTek-Labs/common-kernel-4.19"
+        echo "分支: ${{ github.event.inputs.kernel_branch }}"
         
         # 安装依赖
+        echo "📦 安装编译工具..."
         sudo apt-get update -y
         sudo apt-get install -y --no-install-recommends \
           build-essential bc bison flex libssl-dev libelf-dev \
-          gcc-aarch64-linux-gnu git python3 libncurses-dev
+          gcc-aarch64-linux-gnu git python3 libncurses-dev \
+          dwarves rsync kmod cpio
         
         sudo ln -sf /usr/bin/python3 /usr/bin/python
         
-        # 创建专用目录
-        mkdir -p kernel-build
-        cd kernel-build
+        # 克隆官方内核源码
+        echo "🔧 获取 MediaTek 官方内核源码..."
+        git clone --depth=1 --single-branch --branch=${{ github.event.inputs.kernel_branch }} \
+          https://github.com/MediaTek-Labs/common-kernel-4.19.git kernel-source --quiet
         
-        # 克隆源码
-        echo "🔧 获取内核源码..."
-        git clone --depth=1 --single-branch --branch=mt6768-4.19 \
-          https://github.com/WUNELEZI1/Gale-Kernel-Source.git . --quiet
+        cd kernel-source
         
-        # 快速配置
-        echo "⚙️ 生成配置..."
+        # 清理和配置
+        echo "⚙️ 配置内核..."
         rm -f .config .config.old
-        if ! make ${{ github.event.inputs.defconfig }}; then
-          echo "⚠️ 使用备用配置"
+        
+        # 使用指定配置或默认配置
+        if make ${{ github.event.inputs.defconfig }} 2>/dev/null; then
+          echo "✅ 使用配置: ${{ github.event.inputs.defconfig }}"
+        else
+          echo "⚠️ 使用默认配置"
           make defconfig
         fi
         
-        # 应用关键优化
-        echo "🔧 应用编译优化..."
-        if [ -f .config ]; then
-          # 禁用调试信息
-          sed -i 's/CONFIG_DEBUG_INFO=y/CONFIG_DEBUG_INFO=n/' .config 2>/dev/null || true
-          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/' .config 2>/dev/null || true
-          
-          # 修复：禁用有问题的驱动
-          echo "CONFIG_DEVFREQ_GOV_HELIO_DVFSRC=n" >> .config
-          echo "CONFIG_SCHED_TUNE=n" >> .config
-          
-          echo "✅ 编译优化已应用"
-        fi
+        # 优化配置（可选）
+        echo "🔧 优化配置..."
+        {
+          echo "# 编译优化"
+          echo "CONFIG_DEBUG_INFO=n"
+          echo "CONFIG_DEBUG_KERNEL=n"
+          echo "CONFIG_GDB_SCRIPTS=n"
+        } >> .config
         
+        # 重新生成配置
+        yes "" | make oldconfig > /dev/null 2>&1
+        
+        # 开始编译
         echo "⚡ 开始编译..."
         START_TIME=$(date +%s)
         
-        # 分阶段编译，跳过有问题的模块
-        echo "阶段1: 编译核心镜像 (vmlinux)"
+        # 编译进度监控
+        (
+          echo "📊 编译进度监控..."
+          while true; do
+            if ps aux | grep -v grep | grep -q "make.*-j"; then
+              COMPILED_FILES=$(find . -name "*.o" -type f 2>/dev/null | wc -l)
+              TOTAL_FILES=$(find . -name "*.c" -type f 2>/dev/null | wc -l)
+              if [ $TOTAL_FILES -gt 0 ]; then
+                PERCENT=$((COMPILED_FILES * 100 / TOTAL_FILES))
+                echo "[$(date +%H:%M:%S)] 进度: $PERCENT% ($COMPILED_FILES/$TOTAL_FILES)"
+              fi
+            else
+              break
+            fi
+            sleep 30
+          done
+        ) &
+        MONITOR_PID=$!
+        
+        # 分阶段编译
+        echo "阶段1: 编译 vmlinux..."
         make -j$PARALLEL_JOBS vmlinux
         
-        echo "阶段2: 编译内核镜像 (Image)"
+        echo "阶段2: 编译 Image..."
         make -j$PARALLEL_JOBS Image
         
-        echo "阶段3: 跳过有问题的驱动..."
-        # 跳过 devfreq 和 sched/tune 相关驱动
-        find drivers/devfreq -name "*.c" -exec touch {} \; 2>/dev/null || true
-        find kernel/sched -name "tune.c" -exec touch {} \; 2>/dev/null || true
+        echo "阶段3: 编译模块..."
+        make -j$PARALLEL_JOBS modules 2>/dev/null || echo "⚠️ 模块编译跳过"
         
-        echo "阶段4: 编译设备树 (dtbs)"
+        echo "阶段4: 编译设备树..."
         make -j$PARALLEL_JOBS dtbs 2>/dev/null || echo "⚠️ 设备树编译跳过"
         
-        echo "阶段5: 编译剩余模块"
-        make -j$PARALLEL_JOBS modules 2>/dev/null || echo "⚠️ 模块编译跳过"
+        # 停止监控
+        kill $MONITOR_PID 2>/dev/null || true
         
         END_TIME=$(date +%s)
         COMPILE_TIME=$((END_TIME - START_TIME))
@@ -99,11 +130,18 @@ jobs:
         echo "=== 🏁 编译完成 ==="
         echo "⏱️ 总耗时: ${COMPILE_TIME}秒"
         
-        # 结果检查
-        if ls arch/$ARCH/boot/Image* >/dev/null 2>&1; then
-          echo "✅ 编译成功！"
-          echo "生成文件:"
-          find arch/$ARCH/boot/ -name "Image*" -type f -exec ls -lh {} \; | awk '{print "  " $9 " (" $5 ")"}'
+        # 检查结果
+        IMAGE_FOUND=false
+        for img in Image zImage Image.gz; do
+          if [ -f arch/$ARCH/boot/$img ]; then
+            IMAGE_FOUND=true
+            echo "✅ 成功生成: arch/$ARCH/boot/$img"
+            ls -lh arch/$ARCH/boot/$img
+            break
+          fi
+        done
+        
+        if $IMAGE_FOUND; then
           echo "BUILD_STATUS=success" >> $GITHUB_ENV
         else
           echo "❌ 未找到内核镜像"
@@ -112,9 +150,38 @@ jobs:
         
         echo "COMPILE_TIME=$COMPILE_TIME" >> $GITHUB_ENV
 
-    - name: 上传产物
+    - name: 上传内核镜像
       if: env.BUILD_STATUS == 'success'
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-fixed
-        path: kernel-build/arch/arm64/boot/
+        name: kernel-image
+        path: kernel-source/arch/arm64/boot/Image*
+        retention-days: 7
+
+    - name: 上传所有内核文件
+      if: env.BUILD_STATUS == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-all
+        path: |
+          kernel-source/arch/arm64/boot/
+          kernel-source/.config
+        retention-days: 7
+
+    - name: 上传模块（如果存在）
+      if: env.BUILD_STATUS == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-modules
+        path: kernel-source/modules.tar.gz
+        retention-days: 7
+
+    - name: 打包模块
+      if: env.BUILD_STATUS == 'success'
+      run: |
+        cd kernel-source
+        if [ -d lib/modules ]; then
+          echo "📦 打包内核模块..."
+          tar -czf modules.tar.gz lib/modules/
+          echo "✅ 模块打包完成"
+        fi
