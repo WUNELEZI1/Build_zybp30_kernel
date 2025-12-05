@@ -16,7 +16,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
     - name: 检出仓库
@@ -60,13 +60,13 @@ jobs:
         
         cd kernel-source
 
+        # 🔧 关键修复：修复 dtc 编译错误 (yylloc 多重定义)
         echo "🔧 修复 dtc 编译错误..."
-
         sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
-
         sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c 2>/dev/null || true
-
         echo "✅ dtc 源码修复完成"
+        
+        # 清理和配置
         echo "⚙️ 配置内核..."
         rm -f .config .config.old
         
@@ -113,8 +113,20 @@ jobs:
         echo "阶段2: 编译 Image..."
         make -j$PARALLEL_JOBS Image
         
-        echo "阶段3: 编译模块..."
-        make -j$PARALLEL_JOBS modules 2>/dev/null || echo "⚠️ 模块编译跳过"
+        # 阶段3: 编译模块（捕获详细错误日志）
+        echo "阶段3: 编译模块（捕获详细错误日志）..."
+        make -j$PARALLEL_JOBS modules 2>&1 | tee modules_build.log
+        MODULES_EXIT_CODE=${PIPESTATUS[0]}
+        if [ $MODULES_EXIT_CODE -ne 0 ]; then
+            echo "⚠️ 模块编译出现错误（代码: $MODULES_EXIT_CODE），但继续后续步骤..."
+            echo "=== 最后的错误信息 ==="
+            tail -50 modules_build.log | grep -E "error:|Error:|ERROR:|致命错误|fatal" || echo "未找到明确错误信息，请查看完整日志。"
+            # 记录模块编译失败状态
+            echo "MODULES_BUILD_FAILED=true" >> $GITHUB_ENV
+        else
+            echo "✅ 模块编译成功"
+            echo "MODULES_BUILD_FAILED=false" >> $GITHUB_ENV
+        fi
         
         echo "阶段4: 编译设备树..."
         make -j$PARALLEL_JOBS dtbs 2>/dev/null || echo "⚠️ 设备树编译跳过"
@@ -167,8 +179,17 @@ jobs:
           kernel-source/.config
         retention-days: 7
 
+    - name: 上传模块编译日志
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          kernel-source/modules_build.log
+        retention-days: 3
+
     - name: 打包模块
-      if: env.BUILD_STATUS == 'success'
+      if: env.BUILD_STATUS == 'success' && env.MODULES_BUILD_FAILED == 'false'
       run: |
         cd kernel-source
         if [ -d lib/modules ]; then
@@ -176,3 +197,11 @@ jobs:
           tar -czf modules.tar.gz lib/modules/
           echo "✅ 模块打包完成"
         fi
+
+    - name: 上传内核模块
+      if: env.BUILD_STATUS == 'success' && env.MODULES_BUILD_FAILED == 'false'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-modules
+        path: kernel-source/modules.tar.gz
+        retention-days: 7
