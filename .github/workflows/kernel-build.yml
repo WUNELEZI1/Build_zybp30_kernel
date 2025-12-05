@@ -59,8 +59,14 @@ jobs:
         git clone --depth=1 https://github.com/MediaTek-Labs/common-kernel-4.19.git kernel-source --quiet
         
         cd kernel-source
-        
-        # 清理和配置
+
+        echo "🔧 修复 dtc 编译错误..."
+
+        sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+
+        sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c 2>/dev/null || true
+
+        echo "✅ dtc 源码修复完成"
         echo "⚙️ 配置内核..."
         rm -f .config .config.old
         
