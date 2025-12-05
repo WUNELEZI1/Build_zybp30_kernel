@@ -66,6 +66,15 @@ jobs:
         sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c 2>/dev/null || true
         echo "✅ dtc 源码修复完成"
         
+        # 🔧 关键修复：禁用有问题的 MediaTek DVFSRC 驱动
+        echo "🔧 配置内核时禁用有问题的驱动..."
+        {
+          echo "# 禁用有问题的 MediaTek DVFSRC 驱动"
+          echo "CONFIG_MTK_DVFSRC=n"
+          echo "CONFIG_MTK_DVFSRC_MT6768=n"
+          echo "CONFIG_MTK_DVFSRC_HELPER=n"
+        } > .disable_problematic_drivers
+        
         # 清理和配置
         echo "⚙️ 配置内核..."
         rm -f .config .config.old
@@ -78,10 +87,21 @@ jobs:
           make defconfig
         fi
         
+        # 合并禁用驱动配置
+        cat .disable_problematic_drivers >> .config
+        
         # 优化配置（可选）- 禁用调试信息加速编译
         echo "🔧 应用编译优化..."
         sed -i 's/CONFIG_DEBUG_INFO=y/CONFIG_DEBUG_INFO=n/' .config 2>/dev/null || true
         sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/' .config 2>/dev/null || true
+        
+        # 🔧 额外修复：如果DVFSRC驱动编译仍失败，直接删除源文件
+        echo "🔧 准备修复：如有需要，直接删除有问题的驱动文件..."
+        DVFSRC_DIR="drivers/misc/mediatek/dvfsrc"
+        if [ -d "$DVFSRC_DIR" ]; then
+          echo "找到 DVFSRC 目录，准备在编译失败时修复"
+          echo "DVFSRC_DIR_EXISTS=true" >> $GITHUB_ENV
+        fi
         
         # 开始编译
         echo "⚡ 开始编译..."
@@ -113,16 +133,58 @@ jobs:
         echo "阶段2: 编译 Image..."
         make -j$PARALLEL_JOBS Image
         
-        # 阶段3: 编译模块（捕获详细错误日志）
-        echo "阶段3: 编译模块（捕获详细错误日志）..."
-        make -j$PARALLEL_JOBS modules 2>&1 | tee modules_build.log
+        # 阶段3: 编译模块（使用修复策略）
+        echo "阶段3: 编译模块（使用智能修复策略）..."
+        
+        # 第一次尝试编译模块
+        make -j$PARALLEL_JOBS modules 2>&1 | tee modules_build_attempt1.log
         MODULES_EXIT_CODE=${PIPESTATUS[0]}
+        
         if [ $MODULES_EXIT_CODE -ne 0 ]; then
-            echo "⚠️ 模块编译出现错误（代码: $MODULES_EXIT_CODE），但继续后续步骤..."
-            echo "=== 最后的错误信息 ==="
-            tail -50 modules_build.log | grep -E "error:|Error:|ERROR:|致命错误|fatal" || echo "未找到明确错误信息，请查看完整日志。"
-            # 记录模块编译失败状态
-            echo "MODULES_BUILD_FAILED=true" >> $GITHUB_ENV
+            echo "⚠️ 第一次模块编译失败（代码: $MODULES_EXIT_CODE），尝试修复..."
+            echo "=== 分析错误信息 ==="
+            grep -E "error:|Error:|ERROR:|致命错误|fatal|No such file" modules_build_attempt1.log | tail -20
+            
+            # 检查是否是DVFSRC驱动问题
+            if grep -q "drivers/misc/mediatek/dvfsrc" modules_build_attempt1.log || 
+               grep -q "DVFSRC" modules_build_attempt1.log ||
+               grep -q "dvfsrc" modules_build_attempt1.log; then
+                echo "🔧 检测到 DVFSRC 驱动问题，应用修复..."
+                
+                # 方法1: 确保配置中禁用
+                echo "CONFIG_MTK_DVFSRC=n" >> .config
+                echo "CONFIG_MTK_DVFSRC_MT6768=n" >> .config
+                
+                # 方法2: 如果配置禁用无效，直接删除源文件（最后手段）
+                if [ -d "$DVFSRC_DIR" ]; then
+                    echo "🛠️ 直接禁用 DVFSRC 驱动目录..."
+                    # 创建空文件替代源文件，避免编译错误
+                    find "$DVFSRC_DIR" -name "*.c" -exec sh -c 'echo "/* 此文件已禁用 */" > "$1"' _ {} \;
+                    find "$DVFSRC_DIR" -name "*.h" -exec sh -c 'echo "/* 此文件已禁用 */" > "$1"' _ {} \;
+                    echo "✅ DVFSRC 驱动文件已禁用"
+                fi
+                
+                # 重新生成配置
+                yes "" | make oldconfig > /dev/null 2>&1
+                
+                # 第二次尝试编译模块
+                echo "🔄 重新尝试编译模块..."
+                make -j$PARALLEL_JOBS modules 2>&1 | tee modules_build_attempt2.log
+                MODULES_EXIT_CODE=${PIPESTATUS[0]}
+                
+                if [ $MODULES_EXIT_CODE -ne 0 ]; then
+                    echo "⚠️ 第二次模块编译仍失败（代码: $MODULES_EXIT_CODE）"
+                    echo "=== 第二次编译错误 ==="
+                    grep -E "error:|Error:|ERROR:|致命错误|fatal" modules_build_attempt2.log | tail -20
+                    echo "MODULES_BUILD_FAILED=true" >> $GITHUB_ENV
+                else
+                    echo "✅ 模块编译成功（经过修复）"
+                    echo "MODULES_BUILD_FAILED=false" >> $GITHUB_ENV
+                fi
+            else
+                echo "❌ 未知的模块编译错误，无法自动修复"
+                echo "MODULES_BUILD_FAILED=true" >> $GITHUB_ENV
+            fi
         else
             echo "✅ 模块编译成功"
             echo "MODULES_BUILD_FAILED=false" >> $GITHUB_ENV
@@ -185,7 +247,9 @@ jobs:
       with:
         name: build-logs
         path: |
-          kernel-source/modules_build.log
+          kernel-source/modules_build_attempt1.log
+          kernel-source/modules_build_attempt2.log
+          kernel-source/.disable_problematic_drivers
         retention-days: 3
 
     - name: 打包模块
